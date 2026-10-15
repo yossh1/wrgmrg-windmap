@@ -1,0 +1,102 @@
+<!doctype html>
+<html lang="ja">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title data-ja="風況解析GIS変換アプリ" data-en="Wind Resource GIS Converter">風況解析GIS変換アプリ</title>
+  <link rel="stylesheet" href="/static/app.css">
+</head>
+<body>
+  <main>
+    <div class="language-setting">
+      <label for="language">Language</label>
+      <select id="language" aria-label="Language">
+        <option value="ja" selected>日本語</option>
+        <option value="en">English</option>
+      </select>
+    </div>
+    <h1 data-ja="風況解析GIS変換アプリ" data-en="Wind Resource GIS Converter">風況解析GIS変換アプリ</h1>
+    <p class="note" data-ja="MASCOTから出力される .mrg ファイル、または汎用の風況解析シミュレーションで使われる .wrg ファイルを読み込み、各格子のワイブルパラメーターから平均風速を計算します。" data-en="Load .mrg files exported by MASCOT or .wrg files used by general-purpose wind resource simulation software, and calculate mean wind speed from the Weibull parameters at each grid point.">MASCOTから出力される .mrg ファイル、または汎用の風況解析シミュレーションで使われる .wrg ファイルを読み込み、各格子のワイブルパラメーターから平均風速を計算します。</p>
+    <p class="note" data-ja=".mrg は日本測地系の緯度・経度、.wrg は選択したUTM zoneの座標を使います。出力はQGIS用GeoTIFF・QML・コンターGeoJSONと、Google Earth Pro用KMZをまとめたZIPです。" data-en=".mrg files use Tokyo Datum coordinates; .wrg files use the selected UTM zone. The ZIP contains a GeoTIFF, QML style, and contour GeoJSON for QGIS, plus a KMZ for Google Earth Pro.">.mrg は日本測地系の緯度・経度、.wrg は選択したUTM zoneの座標を使います。出力はQGIS用GeoTIFF・QML・コンターGeoJSONと、Google Earth Pro用KMZをまとめたZIPです。</p>
+    <p class="note" data-ja="風速がカラーマップ範囲外の場合は、下限色または上限色で表示します。" data-en="Wind speeds outside the color-map range are shown using the minimum or maximum color.">風速がカラーマップ範囲外の場合は、下限色または上限色で表示します。</p>
+    <form id="form">
+      <label for="mrg_file" data-ja="MASCOT .mrg / .wrgファイル" data-en="Wind resource file (.mrg / .wrg)">MASCOT .mrg / .wrgファイル</label>
+      <input id="mrg_file" name="mrg_file" type="file" accept=".mrg,.wrg" required>
+      <div id="coordinate_system" class="coordinate-system" hidden>
+        <label for="utm_zone" data-ja="WRGの座標系（WGS 84 / UTM zone）" data-en="WRG coordinate system (WGS 84 / UTM zone)">WRGの座標系（WGS 84 / UTM zone）</label>
+        <div class="utm-controls">
+        <div class="utm-field">
+        <label for="utm_zone" data-ja="UTM zone番号" data-en="UTM zone number">UTM zone番号</label>
+        <select id="utm_zone" name="utm_zone" aria-label="UTMゾーン番号" data-ja-aria="UTMゾーン番号" data-en-aria="UTM zone number">
+__UTM_ZONE_OPTIONS__
+        </select>
+        </div>
+        <div class="utm-field">
+        <label for="utm_hemisphere" data-ja="半球" data-en="Hemisphere">半球</label>
+        <select id="utm_hemisphere" name="utm_hemisphere" aria-label="UTM半球" data-ja-aria="UTM半球" data-en-aria="UTM hemisphere">
+          <option value="N" selected>N</option>
+          <option value="S">S</option>
+        </select>
+        </div>
+        </div>
+      </div>
+      <fieldset class="settings">
+        <legend data-ja="風速カラーマップ（m/s）" data-en="Wind speed color map (m/s)">風速カラーマップ（m/s）</legend>
+        <label for="color_minimum" data-ja="下限" data-en="Minimum">下限</label>
+        <input id="color_minimum" name="color_minimum" type="number" min="0" step="0.1" value="4" required>
+        <label for="color_maximum" data-ja="上限" data-en="Maximum">上限</label>
+        <input id="color_maximum" name="color_maximum" type="number" min="0.1" step="0.1" value="9" required>
+        <div class="division-contour-setting">
+          <div class="compact-setting">
+            <label for="color_divisions" data-ja="分割数（1〜__MAX_COLOR_DIVISIONS__）" data-en="Divisions (1–__MAX_COLOR_DIVISIONS__)">分割数（1〜__MAX_COLOR_DIVISIONS__）</label>
+            <input id="color_divisions" name="color_divisions" type="number" min="1" max="__MAX_COLOR_DIVISIONS__" step="1" value="__DEFAULT_COLOR_DIVISIONS__" required>
+          </div>
+          <div class="compact-setting">
+            <label for="interval" data-ja="コンター間隔（m/s）" data-en="Contour interval (m/s)">コンター間隔（m/s）</label>
+            <div class="contour-controls">
+              <select id="interval_mode" name="interval_mode" aria-label="コンター間隔の設定方法" data-ja-aria="コンター間隔の設定方法" data-en-aria="Contour interval mode">
+                <option value="linked" selected data-ja="連動" data-en="Linked">連動</option>
+                <option value="manual" data-ja="任意" data-en="Custom">任意</option>
+              </select>
+              <input id="interval" name="interval" type="number" min="0.1" max="100" step="any" value="__DEFAULT_CONTOUR_INTERVAL__" readonly required>
+            </div>
+          </div>
+        </div>
+        <p class="note" data-ja="初期設定は4〜9 m/sを10分割（0.5 m/sごと）です。" data-en="Defaults: 4–9 m/s in 10 divisions (0.5 m/s intervals).">初期設定は4〜9 m/sを10分割（0.5 m/sごと）です。</p>
+        <div class="color-preview" role="img" aria-label="カラーマップのプレビュー" data-ja-aria="カラーマップのプレビュー" data-en-aria="Color map preview">
+          <div id="preview_ramp" class="preview-ramp" aria-hidden="true"></div>
+          <div class="preview-labels" aria-hidden="true">
+            <span id="preview_minimum"></span>
+            <span id="preview_maximum"></span>
+          </div>
+          <p id="preview_summary" class="preview-summary" aria-live="polite"></p>
+        </div>
+        <section class="map-preview" aria-label="風速コンター図のプレビュー" data-ja-aria="風速コンター図のプレビュー" data-en-aria="Wind speed contour map preview">
+          <p id="map_preview_status" class="map-preview-status" role="status" data-ja="ファイルを選択すると、風速コンター図を表示します。" data-en="Select a file to preview its wind speed contour map.">ファイルを選択すると、風速コンター図を表示します。</p>
+          <img id="map_preview_image" alt="選択した風況解析ファイルの平均風速コンター図プレビュー" data-ja-alt="選択した風況解析ファイルの平均風速コンター図プレビュー" data-en-alt="Mean wind speed contour map preview for the selected file" hidden>
+        </section>
+        <label for="kmz_opacity_percent" data-ja="KMZ風速レイヤーの不透明度" data-en="KMZ wind layer opacity">KMZ風速レイヤーの不透明度</label>
+        <div class="range-setting">
+          <input id="kmz_opacity_percent" name="kmz_opacity_percent" type="range" min="0" max="100" step="1" value="__DEFAULT_KMZ_OPACITY_PERCENT__">
+          <output id="opacity_value" class="range-value" for="kmz_opacity_percent">__DEFAULT_KMZ_OPACITY_PERCENT__%</output>
+        </div>
+        <p class="note" data-ja="風速の色塗りとコンター線に適用します。80%不透明は20%透過です。" data-en="Applies to the wind-speed overlay and contour lines. 80% opacity means 20% transparency.">風速の色塗りとコンター線に適用します。80%不透明は20%透過です。</p>
+        <label for="show_legend_title" data-ja="KMZ凡例のタイトル" data-en="KMZ legend title">KMZ凡例のタイトル</label>
+        <select id="show_legend_title" name="show_legend_title">
+          <option value="true" selected data-ja="タイトルとカラーバーを表示" data-en="Show title and color bar">タイトルとカラーバーを表示</option>
+          <option value="false" data-ja="カラーバーのみ表示" data-en="Color bar only">カラーバーのみ表示</option>
+        </select>
+        <label for="legend_position" data-ja="カラーバーの位置" data-en="Color bar position">カラーバーの位置</label>
+        <select id="legend_position" name="legend_position">
+          <option value="right" selected data-ja="右" data-en="Right">右</option>
+          <option value="left" data-ja="左" data-en="Left">左</option>
+        </select>
+      </fieldset>
+      <br><button type="submit" data-ja="変換してZIPをダウンロード" data-en="Convert and download ZIP">変換してZIPをダウンロード</button>
+    </form>
+    <p id="error" role="alert"></p>
+  </main>
+  <script>window.WIND_CONFIG = __WIND_CONFIG__;</script>
+  <script src="/static/app.js" defer></script>
+</body>
+</html>

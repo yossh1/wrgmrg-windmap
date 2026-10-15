@@ -1,0 +1,26 @@
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.venv/
+venv/
+
+# Local configuration and uploaded MASCOT data
+.env
+.env.*
+!.env.example
+*.mrg
+*.wrg
+*.pow
+
+# Generated GIS exports and bundles
+wind_speed.*
+mascot_wind_contours.zip
+mascot-wind-gis-app.zip
+wind_speed_outputs.zip
+
+# Editor and operating-system files
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db

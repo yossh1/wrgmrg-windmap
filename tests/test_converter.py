@@ -1,0 +1,620 @@
+import io
+import json
+import math
+from pathlib import Path
+import zipfile
+from xml.etree import ElementTree as ET
+
+import numpy as np
+import pytest
+import rasterio
+from matplotlib.image import imread
+from pyproj import CRS, Transformer
+from pyproj.transformer import TransformerGroup
+from fastapi.testclient import TestClient
+
+from app.converter import (
+    DEFAULT_COLOR_DIVISIONS,
+    DEFAULT_KMZ_OPACITY_PERCENT,
+    DEFAULT_WRG_UTM_ZONE,
+    MAX_COLOR_DIVISIONS,
+    MascotFormatError,
+    _contour_levels,
+    create_exports,
+    parse_mrg,
+    parse_resource_grid,
+    parse_wrg,
+    render_map_preview,
+)
+from app.main import app
+
+
+def make_mrg(path: Path, rows: list[str], nx: int = 2, ny: int = 2) -> None:
+    path.write_text(
+        "\n".join([
+            "&mascot_resource_grid",
+            "ver=5.0,",
+            "SW_latitude= 39.00 52.00 37.7614,",
+            "SW_longitude= 141.00 27.00 19.8235,",
+            "SW_x_coordinate= -3000.0,",
+            "SW_y_coordinate= -3000.0,",
+            f"nx={nx},",
+            f"ny={ny},",
+            "dx=25.0,",
+            "dy=25.0,",
+            "Height=84.0,",
+            "n_wind_direction=16,",
+            "/",
+            "&DATA",
+            "| direction header |",
+            "| columns |",
+            *rows,
+            "/",
+        ]),
+        encoding="cp932",
+    )
+
+
+def make_wrg(path: Path) -> None:
+    path.write_text(
+        "\n".join([
+            "3 2 403077.909 4696286.109 100.0",
+            "GridPoint 403077.909 4696286.109 0.0 104.0 9.26 1.95",
+            "GridPoint 403177.909 4696286.109 0.0 104.0 9.24 1.95",
+            "GridPoint 403277.909 4696286.109 0.0 104.0 9.22 1.94",
+            "GridPoint 403077.909 4696386.109 0.0 104.0 9.28 1.95",
+            "GridPoint 403177.909 4696386.109 0.0 104.0 9.26 1.95",
+            "GridPoint 403277.909 4696386.109 0.0 104.0 9.24 1.94",
+        ]),
+        encoding="cp932",
+    )
+
+
+def test_parse_mrg_calculates_weibull_mean_and_places_grid(tmp_path: Path) -> None:
+    path = tmp_path / "grid.mrg"
+    make_mrg(path, [
+        "-3000 -3000 100 7.26 2.14",
+        "-3000 -2975 101 8 2",
+        "-2975 -3000 102 6 2",
+        "-2975 -2975 103 5 2",
+    ])
+
+    grid = parse_mrg(path)
+
+    assert grid.speeds.shape == (2, 2)
+    assert grid.speeds[0, 0] == pytest.approx(7.26 * math.gamma(1 + 1 / 2.14))
+    assert grid.speeds[1, 0] == pytest.approx(8 * math.gamma(1.5))
+    assert grid.speeds[0, 1] == pytest.approx(6 * math.gamma(1.5))
+    assert grid.sw_latitude == pytest.approx(39 + 52 / 60 + 37.7614 / 3600)
+
+
+def test_parse_mrg_rejects_missing_grid_point(tmp_path: Path) -> None:
+    path = tmp_path / "incomplete.mrg"
+    make_mrg(path, [
+        "-3000 -3000 100 7.26 2.14",
+        "-3000 -2975 101 8 2",
+        "-2975 -3000 102 6 2",
+    ])
+
+    with pytest.raises(MascotFormatError, match="格子データの数"):
+        parse_mrg(path)
+
+
+def test_parse_wrg_reads_utm_grid_and_weibull_parameters(tmp_path: Path) -> None:
+    path = tmp_path / "wind.wrg"
+    make_wrg(path)
+
+    grid = parse_wrg(path, "54N")
+
+    assert grid.speeds.shape == (2, 3)
+    assert grid.speeds[0, 0] == pytest.approx(9.26 * math.gamma(1 + 1 / 1.95))
+    assert grid.speeds[1, 2] == pytest.approx(9.24 * math.gamma(1 + 1 / 1.94))
+    assert grid.coordinate_crs is not None
+    assert grid.coordinate_crs.to_epsg() == 32654
+    assert grid.source_format == "wrg"
+    parsed_by_extension = parse_resource_grid(path, "54N")
+    assert parsed_by_extension.speeds == pytest.approx(grid.speeds)
+    assert parsed_by_extension.coordinate_crs.to_epsg() == 32654
+
+
+def test_wrg_zone_is_defaulted_and_selectable(tmp_path: Path) -> None:
+    path = tmp_path / "wind.wrg"
+    make_wrg(path)
+
+    assert parse_resource_grid(path).coordinate_crs.to_epsg() == 32654
+
+    grid = parse_resource_grid(path, "53N")
+    assert grid.coordinate_crs.to_epsg() == 32653
+    assert parse_wrg(path, "55N").coordinate_crs.to_epsg() == 32655
+    assert parse_wrg(path, "54S").coordinate_crs.to_epsg() == 32754
+    assert parse_wrg(path, "1N").coordinate_crs.to_epsg() == 32601
+    assert parse_wrg(path, "60S").coordinate_crs.to_epsg() == 32760
+
+    with pytest.raises(MascotFormatError, match="1N〜60N"):
+        parse_wrg(path, "61N")
+
+
+def test_parse_wrg_rejects_incomplete_grid(tmp_path: Path) -> None:
+    path = tmp_path / "incomplete.wrg"
+    path.write_text(
+        "2 2 500000 4600000 100\n"
+        "GridPoint 500000 4600000 0 100 8 2\n",
+        encoding="ascii",
+    )
+
+    with pytest.raises(MascotFormatError, match="格子データの数"):
+        parse_wrg(path, "54N")
+
+
+def test_contour_levels_align_to_color_map_minimum_and_division_step() -> None:
+    levels = _contour_levels(
+        np.array([3.7, 4.1, 5.2, 6.1]),
+        interval=0.5,
+        anchor=4.0,
+    )
+    assert levels == pytest.approx([4.0, 4.5, 5.0, 5.5, 6.0])
+
+
+def test_render_map_preview_returns_png_for_wind_grid(tmp_path: Path) -> None:
+    source = tmp_path / "preview.mrg"
+    make_mrg(source, [
+        "-3000 -3000 100 4 2",
+        "-3000 -2975 101 6 2",
+        "-2975 -3000 102 8 2",
+        "-2975 -2975 103 10 2",
+    ])
+
+    image = render_map_preview(
+        parse_mrg(source),
+        4,
+        9,
+        10,
+        0.5,
+        opacity_percent=55,
+        show_legend_title=False,
+        legend_position="left",
+    )
+
+    assert image.startswith(b"\x89PNG\r\n\x1a\n")
+    assert imread(io.BytesIO(image), format="png").shape[0] > 100
+
+
+def test_create_exports_writes_georeferenced_raster_and_contours(tmp_path: Path) -> None:
+    source = tmp_path / "grid.mrg"
+    make_mrg(source, [
+        "-3000 -3000 100 4 2",
+        "-3000 -2975 101 6 2",
+        "-2975 -3000 102 8 2",
+        "-2975 -2975 103 10 2",
+    ])
+    grid = parse_mrg(source)
+    output = tmp_path / "output"
+
+    create_exports(
+        grid,
+        output,
+        1.0,
+        color_minimum=4,
+        color_maximum=9,
+        color_divisions=10,
+    )
+
+    with rasterio.open(output / "wind_speed.tif") as raster:
+        assert (raster.width, raster.height) == (2, 2)
+        assert raster.crs is not None
+        assert raster.nodata is not None
+        band = raster.read(1)
+        assert band[0, 1] == pytest.approx(10 * math.gamma(1.5))
+        assert band[1, 0] == pytest.approx(4 * math.gamma(1.5))
+        tags = raster.tags()
+        assert tags["wind_color_minimum_m_s"] == "4"
+        assert tags["wind_color_maximum_m_s"] == "9"
+        assert tags["wind_color_divisions"] == "10"
+        assert tags["wind_color_step_m_s"] == "0.5"
+        assert tags["kmz_opacity_percent"] == "80"
+        west, south, east, north = raster.bounds
+        assert (west, south, east, north) == pytest.approx((-12.5, -12.5, 37.5, 37.5))
+        to_wgs84 = Transformer.from_crs(raster.crs, CRS.from_epsg(4326), always_xy=True)
+        raster_southwest = to_wgs84.transform(0, 0)
+    expected_southwest = TransformerGroup(
+        CRS.from_epsg(4301),
+        CRS.from_epsg(4326),
+        always_xy=True,
+    ).transformers[0].transform(grid.sw_longitude, grid.sw_latitude)
+    assert raster_southwest == pytest.approx(expected_southwest, abs=1e-7)
+    contours = json.loads((output / "wind_speed_contours.geojson").read_text(encoding="utf-8"))
+    assert contours["type"] == "FeatureCollection"
+    assert contours["features"]
+    with zipfile.ZipFile(output / "wind_speed.kmz") as kmz:
+        assert {
+            "doc.kml",
+            "wind_speed.png",
+            "wind_legend.png",
+            "wind_legend_title.png",
+        } <= set(kmz.namelist())
+        kml = ET.fromstring(kmz.read("doc.kml"))
+    namespace = {"kml": "http://www.opengis.net/kml/2.2"}
+    draw_order = kml.findtext(".//kml:GroundOverlay/kml:drawOrder", namespaces=namespace)
+    assert draw_order == "1"
+    assert kml.findtext(".//kml:GroundOverlay/kml:altitudeMode", namespaces=namespace) == "absolute"
+    assert kml.findtext(".//kml:GroundOverlay/kml:altitude", namespaces=namespace) == "0"
+    assert kml.findtext(".//kml:Style[@id='contour']/kml:LineStyle/kml:color", namespaces=namespace) == "cc202020"
+    line_strings = kml.findall(".//kml:LineString", namespace)
+    assert line_strings
+    for line_string in line_strings:
+        assert line_string.findtext("kml:altitudeMode", namespaces=namespace) == "absolute"
+        coordinates = line_string.findtext("kml:coordinates", namespaces=namespace)
+        assert coordinates
+        assert all(point.endswith(",0") for point in coordinates.split())
+    legend_overlays = kml.findall(".//kml:ScreenOverlay", namespace)
+    assert len(legend_overlays) == 2
+    legend_resources = {
+        overlay.findtext("kml:Icon/kml:href", namespaces=namespace):
+        overlay.findtext("kml:name", namespaces=namespace)
+        for overlay in legend_overlays
+    }
+    assert legend_resources == {
+        "wind_legend.png": "平均風速カラーバー（m/s）",
+        "wind_legend_title.png": "平均風速凡例タイトル",
+    }
+    legend_orders = {
+        overlay.findtext("kml:Icon/kml:href", namespaces=namespace):
+        overlay.findtext("kml:drawOrder", namespaces=namespace)
+        for overlay in legend_overlays
+    }
+    assert legend_orders == {"wind_legend.png": "2", "wind_legend_title.png": "3"}
+    qml = ET.parse(output / "wind_speed.qml")
+    color_ramp = qml.find(".//colorrampshader")
+    assert color_ramp is not None
+    assert color_ramp.get("colorRampType") == "DISCRETE"
+    items = color_ramp.findall("item")
+    assert len(items) == 11
+    assert [float(item.get("value")) for item in items] == pytest.approx(
+        [4, 4.5, 5, 5.5, 6, 6.5, 7, 7.5, 8, 8.5, 9]
+    )
+    assert len({item.get("color") for item in items}) == 10
+
+
+def test_web_form_returns_downloadable_archive(tmp_path: Path) -> None:
+    client = TestClient(app)
+    page = client.get("/")
+    browser_script = client.get("/static/app.js")
+    browser_styles = client.get("/static/app.css")
+    assert page.status_code == 200
+    assert browser_script.status_code == 200
+    assert browser_styles.status_code == 200
+    assert 'href="/static/app.css"' in page.text
+    assert 'src="/static/app.js"' in page.text
+    assert "window.WIND_CONFIG" in browser_script.text
+    assert ".map-preview" in browser_styles.text
+    assert 'data-ja="風況解析GIS変換アプリ" data-en="Wind Resource GIS Converter"' in page.text
+    assert "MASCOTから出力される .mrg ファイル" in page.text
+    assert "汎用の風況解析シミュレーションで使われる .wrg ファイル" in page.text
+    assert 'name="color_minimum"' in page.text
+    assert 'name="color_maximum"' in page.text
+    assert 'name="color_divisions"' in page.text
+    assert 'name="interval_mode" aria-label="コンター間隔の設定方法"' in page.text
+    assert '<option value="linked" selected data-ja="連動" data-en="Linked">連動</option>' in page.text
+    assert '<option value="manual" data-ja="任意" data-en="Custom">任意</option>' in page.text
+    assert 'name="interval" type="number" min="0.1" max="100" step="any" value="0.5" readonly required' in page.text
+    assert '<div class="division-contour-setting">' in page.text
+    assert "intervalInput.value = formatNumber((maximum - minimum) / divisions)" in browser_script.text
+    assert "intervalInput.readOnly = linked" in browser_script.text
+    assert 'id="preview_ramp"' in page.text
+    assert 'id="preview_summary"' in page.text
+    assert 'data-ja-aria="カラーマップのプレビュー" data-en-aria="Color map preview"' in page.text
+    assert 'id="map_preview_image"' in page.text
+    assert 'data-ja-aria="風速コンター図のプレビュー" data-en-aria="Wind speed contour map preview"' in page.text
+    assert 'id="map_preview_status"' in page.text
+    assert 'fetch("/preview"' in browser_script.text
+    assert '["#show_legend_title", "#legend_position"]' in browser_script.text
+    assert 'opacityValue.value = `${opacityInput.value}%`' in browser_script.text
+    assert "updateColorPreview" in browser_script.text
+    assert "currentLanguage().summary(divisions, formatNumber((maximum - minimum) / divisions))" in browser_script.text
+    assert 'name="show_legend_title"' in page.text
+    assert 'name="legend_position"' in page.text
+    assert 'accept=".mrg,.wrg"' in page.text
+    assert 'name="utm_zone" aria-label="UTMゾーン番号"' in page.text
+    assert 'name="utm_hemisphere" aria-label="UTM半球"' in page.text
+    assert 'id="coordinate_system" class="coordinate-system" hidden' in page.text
+    assert 'utmZoneInput.required = isWrg' in browser_script.text
+    assert 'utmHemisphereInput.required = isWrg' in browser_script.text
+    assert f'<option value="54" selected>54</option>' in page.text
+    assert '<option value="60">60</option>' in page.text
+    assert '<option value="N" selected>N</option>' in page.text
+    assert '<option value="S">S</option>' in page.text
+    assert '<label for="language">Language</label>' in page.text
+    assert '<select id="language" aria-label="Language">' in page.text
+    assert '<option value="ja" selected>日本語</option>' in page.text
+    assert '<option value="en">English</option>' in page.text
+    assert 'data-en="Wind Resource GIS Converter"' in page.text
+    assert '<option value="right" selected data-ja="右" data-en="Right">右</option>' in page.text
+    assert '<option value="left" data-ja="左" data-en="Left">左</option>' in page.text
+    assert '<option value="true" selected data-ja="タイトルとカラーバーを表示" data-en="Show title and color bar">タイトルとカラーバーを表示</option>' in page.text
+    assert '<option value="false" data-ja="カラーバーのみ表示" data-en="Color bar only">カラーバーのみ表示</option>' in page.text
+    assert "${timestamp}_mascot_wind_contours.zip" in browser_script.text
+    assert "now.getFullYear()" in browser_script.text
+    assert 'name="color_minimum" type="number" min="0" step="0.1" value="4"' in page.text
+    assert 'name="color_maximum" type="number" min="0.1" step="0.1" value="9"' in page.text
+    assert (
+        f'name="kmz_opacity_percent" type="range" min="0" max="100" step="1" '
+        f'value="{DEFAULT_KMZ_OPACITY_PERCENT}"'
+    ) in page.text
+    assert f">{DEFAULT_KMZ_OPACITY_PERCENT}%</output>" in page.text
+    assert (
+        f'name="color_divisions" type="number" min="1" max="{MAX_COLOR_DIVISIONS}" '
+        f'step="1" value="{DEFAULT_COLOR_DIVISIONS}"'
+    ) in page.text
+
+    source = tmp_path / "grid.mrg"
+    make_mrg(source, [
+        "-3000 -3000 100 4 2",
+        "-3000 -2975 101 6 2",
+        "-2975 -3000 102 8 2",
+        "-2975 -2975 103 10 2",
+    ])
+
+    preview_response = TestClient(app).post(
+        "/preview",
+        files={"mrg_file": ("grid.mrg", source.read_bytes(), "text/plain")},
+        data={
+            "interval": "1.0",
+            "interval_mode": "linked",
+            "color_minimum": "2",
+            "color_maximum": "8",
+            "color_divisions": "12",
+            "kmz_opacity_percent": "55",
+            "show_legend_title": "false",
+            "legend_position": "left",
+            "utm_zone": "54",
+            "utm_hemisphere": "N",
+        },
+    )
+    assert preview_response.status_code == 200
+    assert preview_response.headers["content-type"] == "image/png"
+    assert preview_response.content.startswith(b"\x89PNG\r\n\x1a\n")
+    preview_image = imread(io.BytesIO(preview_response.content), format="png")
+    assert preview_image.shape[1] > preview_image.shape[0]
+
+    response = TestClient(app).post(
+        "/convert",
+        files={"mrg_file": ("grid.mrg", source.read_bytes(), "text/plain")},
+        data={"interval": "1.0"},
+    )
+
+    assert response.status_code == 200
+    assert response.headers["content-type"] == "application/zip"
+    with zipfile.ZipFile(io.BytesIO(response.content)) as archive:
+        assert "wind_speed.tif" in archive.namelist()
+        assert "wind_speed.kmz" in archive.namelist()
+        with rasterio.MemoryFile(archive.read("wind_speed.tif")) as memory_file:
+            with memory_file.open() as raster:
+                assert raster.tags()["wind_color_minimum_m_s"] == "4.0"
+                assert raster.tags()["wind_color_maximum_m_s"] == "9.0"
+                assert raster.tags()["wind_color_divisions"] == "10"
+                assert raster.tags()["kmz_opacity_percent"] == "80"
+        default_kmz = zipfile.ZipFile(io.BytesIO(archive.read("wind_speed.kmz")))
+        default_kml = ET.fromstring(default_kmz.read("doc.kml"))
+        default_legend = imread(
+            io.BytesIO(default_kmz.read("wind_legend.png")),
+            format="png",
+        )
+        assert default_legend[:, :, 3].min() == pytest.approx(1.0)
+        assert default_legend.shape[0] > default_legend.shape[1]
+        assert default_legend.shape[1] / default_legend.shape[0] == pytest.approx(
+            0.8 / 4.13,
+            abs=0.01,
+        )
+        bar_sample = default_legend[
+            default_legend.shape[0] // 2,
+            default_legend.shape[1] // 3,
+            :3,
+        ]
+        assert bar_sample.mean() < 0.9
+        title_image = imread(
+            io.BytesIO(default_kmz.read("wind_legend_title.png")),
+            format="png",
+        )
+        assert title_image[:, :, 3].min() == pytest.approx(0.0)
+        assert title_image[:, :, 3].max() == pytest.approx(1.0)
+        kml_namespace = {"k": "http://www.opengis.net/kml/2.2"}
+        default_screen_overlays = default_kml.findall(".//k:ScreenOverlay", kml_namespace)
+        assert {
+            overlay.findtext("k:Icon/k:href", namespaces=kml_namespace)
+            for overlay in default_screen_overlays
+        } == {"wind_legend.png", "wind_legend_title.png"}
+        overlay_positions = {
+            overlay.findtext("k:Icon/k:href", namespaces=kml_namespace):
+            (
+                overlay.find("k:screenXY", kml_namespace).get("x"),
+                overlay.find("k:screenXY", kml_namespace).get("y"),
+                overlay.find("k:size", kml_namespace).get("x"),
+                overlay.find("k:size", kml_namespace).get("y"),
+            )
+            for overlay in default_screen_overlays
+        }
+        assert overlay_positions == {
+            "wind_legend.png": ("0.78", "0.955", "0.05", "0.55"),
+            "wind_legend_title.png": ("0.21", "0.985", "0.32", "0"),
+        }
+        assert default_kml.findtext(
+            ".//{http://www.opengis.net/kml/2.2}Style[@id='contour']/"
+            "{http://www.opengis.net/kml/2.2}LineStyle/"
+            "{http://www.opengis.net/kml/2.2}color"
+        ) == "cc202020"
+        default_overlay = imread(io.BytesIO(default_kmz.read("wind_speed.png")), format="png")
+        assert float(default_overlay[:, :, 3].max()) == pytest.approx(0.8, abs=0.01)
+        default_kmz.close()
+
+    custom_response = TestClient(app).post(
+        "/convert",
+        files={"mrg_file": ("grid.mrg", source.read_bytes(), "text/plain")},
+        data={
+            "interval": "1.0",
+            "interval_mode": "manual",
+            "color_minimum": "2",
+            "color_maximum": "8",
+            "color_divisions": "12",
+            "kmz_opacity_percent": "55",
+            "show_legend_title": "false",
+            "legend_position": "left",
+        },
+    )
+    assert custom_response.status_code == 200
+    with zipfile.ZipFile(io.BytesIO(custom_response.content)) as archive:
+        with rasterio.MemoryFile(archive.read("wind_speed.tif")) as memory_file:
+            with memory_file.open() as raster:
+                assert raster.tags()["wind_color_minimum_m_s"] == "2.0"
+                assert raster.tags()["wind_color_maximum_m_s"] == "8.0"
+                assert raster.tags()["wind_color_divisions"] == "12"
+                assert raster.tags()["kmz_opacity_percent"] == "55"
+        contours = json.loads(archive.read("wind_speed_contours.geojson"))
+        contour_values = {
+            feature["properties"]["wind_speed_m_s"]
+            for feature in contours["features"]
+        }
+        assert contour_values
+        assert all((value - 2) % 1 == pytest.approx(0) for value in contour_values)
+        custom_kmz = zipfile.ZipFile(io.BytesIO(archive.read("wind_speed.kmz")))
+        custom_kml = ET.fromstring(custom_kmz.read("doc.kml"))
+        custom_legend = imread(
+            io.BytesIO(custom_kmz.read("wind_legend.png")),
+            format="png",
+        )
+        assert custom_legend[:, :, 3].min() == pytest.approx(1.0)
+        custom_bar_sample = custom_legend[
+            custom_legend.shape[0] // 2,
+            custom_legend.shape[1] // 3,
+            :3,
+        ]
+        assert custom_bar_sample.mean() > bar_sample.mean()
+        custom_screen_overlays = custom_kml.findall(".//k:ScreenOverlay", kml_namespace)
+        assert len(custom_screen_overlays) == 1
+        assert custom_screen_overlays[0].findtext(
+            "k:Icon/k:href",
+            namespaces=kml_namespace,
+        ) == "wind_legend.png"
+        assert custom_screen_overlays[0].find("k:overlayXY", kml_namespace).get("x") == "1"
+        assert custom_screen_overlays[0].find("k:screenXY", kml_namespace).get("x") == "0.213"
+        assert "wind_legend_title.png" not in custom_kmz.namelist()
+        custom_line_color = custom_kml.findtext(
+            ".//{http://www.opengis.net/kml/2.2}Style[@id='contour']/"
+            "{http://www.opengis.net/kml/2.2}LineStyle/"
+            "{http://www.opengis.net/kml/2.2}color"
+        )
+        assert custom_line_color == "8c202020"
+        custom_overlay = imread(io.BytesIO(custom_kmz.read("wind_speed.png")), format="png")
+        assert float(custom_overlay[:, :, 3].max()) == pytest.approx(0.55, abs=0.01)
+        custom_kmz.close()
+
+
+def test_web_form_rejects_invalid_color_scale(tmp_path: Path) -> None:
+    source = tmp_path / "grid.mrg"
+    make_mrg(source, [
+        "-3000 -3000 100 4 2",
+        "-3000 -2975 101 6 2",
+        "-2975 -3000 102 8 2",
+        "-2975 -2975 103 10 2",
+    ])
+
+    response = TestClient(app).post(
+        "/convert",
+        files={"mrg_file": ("grid.mrg", source.read_bytes(), "text/plain")},
+        data={
+            "interval": "1.0",
+            "color_minimum": "9",
+            "color_maximum": "4",
+            "color_divisions": "10",
+        },
+    )
+
+    assert response.status_code == 400
+    assert "上限は下限より大きい" in response.json()["detail"]
+
+
+def test_web_form_previews_and_exports_wrg_input(tmp_path: Path) -> None:
+    source = tmp_path / "wind.wrg"
+    make_wrg(source)
+    client = TestClient(app)
+    data = {
+        "interval": "0.1",
+        "interval_mode": "manual",
+        "color_minimum": "9.1",
+        "color_maximum": "9.4",
+        "color_divisions": "3",
+        "utm_zone": "54",
+        "utm_hemisphere": "N",
+    }
+    files = {"mrg_file": ("wind.wrg", source.read_bytes(), "text/plain")}
+
+    preview_response = client.post("/preview", files=files, data=data)
+    assert preview_response.status_code == 200
+    assert preview_response.headers["content-type"] == "image/png"
+    assert preview_response.content.startswith(b"\x89PNG\r\n\x1a\n")
+
+    response = client.post("/convert", files=files, data=data)
+    assert response.status_code == 200
+    with zipfile.ZipFile(io.BytesIO(response.content)) as archive:
+        with rasterio.MemoryFile(archive.read("wind_speed.tif")) as memory_file:
+            with memory_file.open() as raster:
+                assert raster.crs.to_epsg() == 32654
+                assert raster.bounds.left == pytest.approx(403027.909)
+                assert raster.bounds.top == pytest.approx(4696436.109)
+                assert raster.tags()["source_format"] == "wrg"
+                assert raster.tags()["source_horizontal_datum"] == (
+                    "WGS 84 / UTM zone 54N (EPSG:32654)"
+                )
+        contours = json.loads(archive.read("wind_speed_contours.geojson"))
+        assert contours["features"]
+        longitude, latitude = contours["features"][0]["geometry"]["coordinates"][0]
+        assert 139 < longitude < 142
+        assert 41 < latitude < 44
+
+    other_zone_data = {**data, "utm_zone": "53"}
+    other_zone_response = client.post("/convert", files=files, data=other_zone_data)
+    assert other_zone_response.status_code == 200
+    with zipfile.ZipFile(io.BytesIO(other_zone_response.content)) as archive:
+        with rasterio.MemoryFile(archive.read("wind_speed.tif")) as memory_file:
+            with memory_file.open() as raster:
+                assert raster.crs.to_epsg() == 32653
+
+    other_hemisphere_data = {**data, "utm_hemisphere": "S"}
+    other_hemisphere_response = client.post("/convert", files=files, data=other_hemisphere_data)
+    assert other_hemisphere_response.status_code == 200
+    with zipfile.ZipFile(io.BytesIO(other_hemisphere_response.content)) as archive:
+        with rasterio.MemoryFile(archive.read("wind_speed.tif")) as memory_file:
+            with memory_file.open() as raster:
+                assert raster.crs.to_epsg() == 32754
+
+    invalid_zone_response = client.post(
+        "/convert",
+        files=files,
+        data={**data, "utm_zone": "61"},
+    )
+    assert invalid_zone_response.status_code == 400
+    assert "1〜60" in invalid_zone_response.json()["detail"]
+
+    default_zone_response = client.post(
+        "/convert",
+        files=files,
+        data={
+            key: value
+            for key, value in data.items()
+            if key not in {"utm_zone", "utm_hemisphere"}
+        },
+    )
+    assert default_zone_response.status_code == 200
+    with zipfile.ZipFile(io.BytesIO(default_zone_response.content)) as archive:
+        with rasterio.MemoryFile(archive.read("wind_speed.tif")) as memory_file:
+            with memory_file.open() as raster:
+                assert raster.crs.to_epsg() == 32654
+
+
+def test_web_form_rejects_unsupported_file_extension() -> None:
+    response = TestClient(app).post(
+        "/convert",
+        files={"mrg_file": ("grid.txt", b"not a MASCOT grid", "text/plain")},
+    )
+
+    assert response.status_code == 400
+    assert ".mrgまたは.wrg" in response.json()["detail"]
