@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import math
 import zipfile
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 from xml.etree import ElementTree as ET
@@ -252,6 +253,10 @@ def _write_geotiff(
     color_maximum: float | None = None,
     color_divisions: int | None = None,
     opacity_percent: int | None = None,
+    values: np.ndarray | None = None,
+    band_description: str = "Weibull mean wind speed (m/s)",
+    additional_tags: dict[str, str] | None = None,
+    progress_callback: Callable[[int], None] | None = None,
 ) -> None:
     longitude, latitude, datum_transform = _wgs84_anchor(grid)
     crs = _local_crs(grid)
@@ -279,6 +284,11 @@ def _write_geotiff(
         "sw_latitude": f"{latitude:.10f}",
         "sw_longitude": f"{longitude:.10f}",
     }
+    if values is not None:
+        tags.pop("wind_speed_formula")
+        tags["source"] = f"MASCOT .{grid.source_format} sector-wise Weibull distributions"
+    if additional_tags:
+        tags.update(additional_tags)
     if (
         color_minimum is not None
         and color_maximum is not None
@@ -307,16 +317,30 @@ def _write_geotiff(
         compress="deflate",
         predictor=3,
     ) as dataset:
-        dataset.write(grid.speeds[::-1, :], 1)
-        dataset.set_band_description(1, "Weibull mean wind speed (m/s)")
+        output_values = (grid.speeds if values is None else values)[::-1, :]
+        row_chunk = max(1, min(256, grid.ny))
+        for row_start in range(0, grid.ny, row_chunk):
+            row_end = min(row_start + row_chunk, grid.ny)
+            dataset.write(
+                output_values[row_start:row_end, :],
+                1,
+                window=((row_start, row_end), (0, grid.nx)),
+            )
+            if progress_callback is not None:
+                progress_callback(round(row_end / grid.ny * 100))
+        dataset.set_band_description(1, band_description)
         dataset.update_tags(**tags)
 
 
-def create_wind_speed_geotiff(grid: ResourceGrid, output_path: str | Path) -> Path:
+def create_wind_speed_geotiff(
+    grid: ResourceGrid,
+    output_path: str | Path,
+    progress_callback: Callable[[int], None] | None = None,
+) -> Path:
     """Write an unstyled GeoTIFF containing mean wind speed in m/s."""
     path = Path(output_path)
     path.parent.mkdir(parents=True, exist_ok=True)
-    _write_geotiff(grid, path)
+    _write_geotiff(grid, path, progress_callback=progress_callback)
     return path
 
 

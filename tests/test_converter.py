@@ -2,6 +2,7 @@ import io
 import json
 import math
 from pathlib import Path
+import time
 import zipfile
 from xml.etree import ElementTree as ET
 
@@ -20,14 +21,16 @@ from app.converter import (
     MAX_COLOR_DIVISIONS,
     MascotFormatError,
     _contour_levels,
+    calculate_annual_energy,
     create_exports,
     create_wind_speed_geotiff,
+    parse_power_curve,
     parse_mrg,
     parse_resource_grid,
     parse_wrg,
     render_map_preview,
 )
-from app.main import app
+from app.main import _conversion_jobs, _conversion_jobs_lock, _public_job_status, app
 
 
 def make_mrg(path: Path, rows: list[str], nx: int = 2, ny: int = 2) -> None:
@@ -69,6 +72,24 @@ def make_wrg(path: Path) -> None:
         ]),
         encoding="cp932",
     )
+
+
+def make_directional_wrg(
+    path: Path,
+    sector_values: list[tuple[int, int, int]],
+) -> None:
+    rows = ["2 2 403000 4696000 100"]
+    for y in (4696000, 4696100):
+        for x in (403000, 403100):
+            sector_data = " ".join(
+                str(value)
+                for frequency, scale, shape in sector_values
+                for value in (frequency, scale, shape)
+            )
+            rows.append(
+                f"GridPoint {x} {y} 0 100 10 2 0 {len(sector_values)} {sector_data}"
+            )
+    path.write_text("\n".join(rows), encoding="ascii")
 
 
 def test_parse_mrg_calculates_weibull_mean_and_places_grid(tmp_path: Path) -> None:
@@ -301,18 +322,23 @@ def test_web_form_returns_downloadable_archive(tmp_path: Path) -> None:
     assert browser_script.status_code == 200
     assert browser_styles.status_code == 200
     assert 'role="tablist"' in page.text
-    assert 'id="geotiff-panel" role="tabpanel"' in page.text
+    assert 'id="colored-panel" role="tabpanel" aria-labelledby="colored-tab"' in page.text
+    assert 'id="mean-panel" role="tabpanel" aria-labelledby="mean-tab" hidden' in page.text
+    assert 'data-ja="色付きマップ" data-en="Colored map"' in page.text
+    assert 'data-ja="WRG → 平均風速" data-en="WRG → Mean wind speed"' in page.text
+    assert 'data-ja="WRG → AEP" data-en="WRG → AEP"' in page.text
+    assert page.text.count('role="tab"') == 3
     assert 'name="wrg_files" type="file" accept=".wrg" multiple required' in page.text
     assert 'zoneSelect.name = "utm_zones"' in browser_script.text
     assert 'hemisphereSelect.name = "utm_hemispheres"' in browser_script.text
-    assert browser_script.text.index(
-        "const formData = new FormData(event.target)"
-    ) < browser_script.text.index("wrgFilesInput.disabled = true")
+    assert "body: new FormData(event.target)" in browser_script.text
+    assert 'endpoint: "/conversion-jobs/mean-wind-speed"' in browser_script.text
     assert "request.send(formData)" in browser_script.text
-    assert 'request.open("POST", "/convert-wrg-geotiffs")' in browser_script.text
     assert 'request.upload.addEventListener("progress"' in browser_script.text
+    assert 'id="geotiff_file_logs" class="conversion-file-logs"' in page.text
     assert 'id="geotiff_progress" max="100" value="0"' in page.text
-    assert 'id="geotiff_status" role="status" aria-live="polite"' in page.text
+    assert 'id="geotiff_status" class="conversion-overall-status" role="status" aria-live="polite"' in page.text
+    assert page.text.index('id="geotiff_file_logs"') < page.text.index('id="geotiff_status"')
     assert 'href="/static/app.css"' in page.text
     assert 'src="/static/app.js"' in page.text
     assert "window.WIND_CONFIG" in browser_script.text
@@ -733,3 +759,271 @@ def test_web_form_rejects_unsupported_file_extension() -> None:
 
     assert response.status_code == 400
     assert ".mrgまたは.wrg" in response.json()["detail"]
+
+
+@pytest.mark.parametrize("sector_count", [7, 12, 16])
+def test_parse_wrg_preserves_arbitrary_number_of_sector_distributions(
+    tmp_path: Path,
+    sector_count: int,
+) -> None:
+    frequencies = [1000 // sector_count] * sector_count
+    frequencies[-1] += 1000 - sum(frequencies)
+    path = tmp_path / f"sectors_{sector_count}.wrg"
+    make_directional_wrg(path, [(frequency, 100, 200) for frequency in frequencies])
+
+    grid = parse_wrg(path, "54N")
+
+    assert grid.sector_frequencies is not None
+    assert grid.sector_scales is not None
+    assert grid.sector_shapes is not None
+    assert grid.sector_frequencies.shape == (2, 2, sector_count)
+    assert grid.sector_frequencies[0, 0].sum() == pytest.approx(100)
+    assert np.all(grid.sector_scales == 10)
+    assert np.all(grid.sector_shapes == 2)
+
+
+def test_annual_energy_uses_sector_frequency_linear_curve_and_zero_outside_range(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "directional.wrg"
+    make_directional_wrg(path, [(250, 50, 100), (750, 150, 100)])
+    grid = parse_wrg(path, "54N")
+    curve_speeds, curve_powers = parse_power_curve(b"wind speed,power\n0,0\n20,1000\n")
+
+    annual_energy = calculate_annual_energy(grid, curve_speeds, curve_powers)
+
+    edges = np.append(np.arange(0, 20, 0.5), 20)
+    midpoints = (edges[:-1] + edges[1:]) / 2
+    expected_mean_power_5 = np.sum(
+        50 * midpoints * (np.exp(-edges[:-1] / 5) - np.exp(-edges[1:] / 5))
+    )
+    expected_mean_power_15 = np.sum(
+        50 * midpoints * (np.exp(-edges[:-1] / 15) - np.exp(-edges[1:] / 15))
+    )
+    expected = (0.25 * expected_mean_power_5 + 0.75 * expected_mean_power_15) * 8760 / 1000
+    progress: list[int] = []
+    annual_energy = calculate_annual_energy(grid, curve_speeds, curve_powers, progress.append)
+    assert annual_energy == pytest.approx(np.full((2, 2), expected), rel=1e-6)
+    assert progress[-1] == 100
+    assert progress == sorted(progress)
+    parallel_energy = calculate_annual_energy(
+        grid,
+        curve_speeds,
+        curve_powers,
+        workers=2,
+    )
+    assert parallel_energy == pytest.approx(annual_energy, rel=1e-6)
+    grid.speeds.fill(np.nan)
+    assert calculate_annual_energy(grid, curve_speeds, curve_powers) == pytest.approx(
+        np.full((2, 2), expected),
+        rel=1e-6,
+    )
+
+
+@pytest.mark.parametrize(
+    ("content", "expected_speeds", "expected_powers"),
+    [
+        (b"Wind speed,Power\n10,500\n0,0\n", [0, 10], [0, 500]),
+        (b"0;0\n5;250\n10;1000\n", [0, 5, 10], [0, 250, 1000]),
+        (b"0\t0\n4\t400\n", [0, 4], [0, 400]),
+    ],
+)
+def test_parse_power_curve_delimiters_headers_and_unsorted_points(
+    content: bytes,
+    expected_speeds: list[float],
+    expected_powers: list[float],
+) -> None:
+    speeds, powers = parse_power_curve(content)
+
+    assert speeds.tolist() == expected_speeds
+    assert powers.tolist() == expected_powers
+
+
+@pytest.mark.parametrize(
+    "content",
+    [
+        b"0,0\n0,100\n",
+        b"0,-1\n10,100\n",
+        b"0,0\n",
+        b"wind,power\nnot-a-number,100\n",
+    ],
+)
+def test_parse_power_curve_rejects_invalid_values(content: bytes) -> None:
+    with pytest.raises(MascotFormatError):
+        parse_power_curve(content)
+
+
+def test_web_power_curve_preview_and_annual_energy_zip(tmp_path: Path) -> None:
+    path = tmp_path / "directional.wrg"
+    make_directional_wrg(path, [(500, 100, 200), (500, 100, 200)])
+    content = path.read_bytes()
+    curve = b"Wind speed,Power kW\n0,1000\n100,1000\n"
+    client = TestClient(app)
+
+    preview = client.post(
+        "/preview-power-curve",
+        files={"power_curve_file": ("curve.csv", curve, "text/csv")},
+    )
+    assert preview.status_code == 200
+    assert len(preview.json()["points"]) == 2
+
+    response = client.post(
+        "/convert-wrg-energy-geotiffs",
+        files=[
+            ("wrg_files", ("north.wrg", content, "text/plain")),
+            ("wrg_files", ("south.wrg", content, "text/plain")),
+            ("power_curve_files", ("turbine_a.csv", curve, "text/csv")),
+            ("power_curve_files", ("turbine_b.csv", b"0,500\n100,500\n", "text/csv")),
+        ],
+        data={
+            "utm_zones": ["54", "54"],
+            "utm_hemispheres": ["N", "S"],
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.headers["content-type"] == "application/zip"
+    with zipfile.ZipFile(io.BytesIO(response.content)) as archive:
+        assert archive.namelist() == [
+            "north_turbine_a.tif",
+            "north_turbine_b.tif",
+            "south_turbine_a.tif",
+            "south_turbine_b.tif",
+        ]
+        for name, epsg, expected_energy in (
+            ("north_turbine_a.tif", 32654, 8760),
+            ("north_turbine_b.tif", 32654, 4380),
+            ("south_turbine_a.tif", 32754, 8760),
+            ("south_turbine_b.tif", 32754, 4380),
+        ):
+            with rasterio.MemoryFile(archive.read(name)) as memory_file:
+                with memory_file.open() as raster:
+                    assert raster.crs.to_epsg() == epsg
+                    assert raster.dtypes == ("float32",)
+                    assert raster.descriptions == ("Gross annual energy production (MWh/year)",)
+                    assert raster.tags()["unit"] == "MWh/year"
+                    assert raster.tags()["assumptions"] == "No availability, electrical, or wake losses"
+                    assert np.all(raster.read(1) == pytest.approx(expected_energy))
+
+
+@pytest.mark.parametrize(
+    ("mode", "endpoint"),
+    [
+        ("mean", "/conversion-jobs/mean-wind-speed"),
+        ("energy", "/conversion-jobs/annual-energy"),
+    ],
+)
+def test_conversion_job_reports_per_file_progress_and_downloads_zip(
+    tmp_path: Path,
+    mode: str,
+    endpoint: str,
+) -> None:
+    path = tmp_path / "directional.wrg"
+    make_directional_wrg(path, [(500, 100, 200), (500, 100, 200)])
+    wrg_content = path.read_bytes()
+    files = [
+        ("wrg_files", ("north.wrg", wrg_content, "text/plain")),
+        ("wrg_files", ("south.wrg", wrg_content, "text/plain")),
+    ]
+    if mode == "energy":
+        files.extend([
+            ("power_curve_files", ("turbine-a.csv", b"0,0\n20,2000\n", "text/csv")),
+            ("power_curve_files", ("turbine-b.csv", b"0,0\n20,1000\n", "text/csv")),
+        ])
+    client = TestClient(app)
+
+    started = client.post(
+        endpoint,
+        files=files,
+        data={"utm_zones": ["54", "54"], "utm_hemispheres": ["N", "S"]},
+    )
+
+    assert started.status_code == 202
+    job_id = started.json()["id"]
+    for _ in range(200):
+        status = client.get(f"/conversion-jobs/{job_id}")
+        assert status.status_code == 200
+        if status.json()["status"] in {"complete", "failed"}:
+            break
+        time.sleep(0.01)
+    assert status.json()["status"] == "complete"
+    assert status.json()["progress"] == 100
+    expected_names = (
+        ["north.wrg", "south.wrg"]
+        if mode == "mean"
+        else [
+            "north.wrg × turbine-a.csv",
+            "north.wrg × turbine-b.csv",
+            "south.wrg × turbine-a.csv",
+            "south.wrg × turbine-b.csv",
+        ]
+    )
+    assert [item["name"] for item in status.json()["files"]] == expected_names
+    assert all(
+        item["stage"] == "complete" and item["progress"] == 100
+        for item in status.json()["files"]
+    )
+
+    downloaded = client.get(f"/conversion-jobs/{job_id}/download")
+
+    assert downloaded.status_code == 200
+    with zipfile.ZipFile(io.BytesIO(downloaded.content)) as archive:
+        expected_archive_names = (
+            ["north.tif", "south.tif"]
+            if mode == "mean"
+            else [
+                "north_turbine-a.tif",
+                "north_turbine-b.tif",
+                "south_turbine-a.tif",
+                "south_turbine-b.tif",
+            ]
+        )
+        assert archive.namelist() == expected_archive_names
+
+
+def test_conversion_job_progress_weights_upload_analysis_and_zip() -> None:
+    job_id = "progress-weight-test"
+    with _conversion_jobs_lock:
+        _conversion_jobs[job_id] = {
+            "status": "running",
+            "stage": "analysis",
+            "files": [{"name": "sample.wrg", "stage": "parsing", "progress": 50}],
+            "archive_progress": 0,
+        }
+    try:
+        assert _public_job_status(job_id)["progress"] == 50
+        with _conversion_jobs_lock:
+            _conversion_jobs[job_id].update(status="packaging", stage="packaging")
+            _conversion_jobs[job_id]["archive_progress"] = 50
+        status = _public_job_status(job_id)
+        assert status["stage"] == "packaging"
+        assert status["progress"] == 95
+        with _conversion_jobs_lock:
+            _conversion_jobs[job_id]["status"] = "complete"
+        assert _public_job_status(job_id)["progress"] == 100
+    finally:
+        with _conversion_jobs_lock:
+            _conversion_jobs.pop(job_id, None)
+
+
+def test_energy_ui_includes_curve_preview_and_conversion_progress() -> None:
+    client = TestClient(app)
+    page = client.get("/")
+    script = client.get("/static/app.js")
+    energy_script = client.get("/static/energy.js")
+
+    assert page.status_code == 200
+    assert 'id="energy-panel" role="tabpanel"' in page.text
+    assert 'id="power_curve_previews"' in page.text
+    assert 'name="power_curve_files" type="file" accept=".csv,text/csv" multiple required' in page.text
+    assert 'id="energy_progress" max="100" value="0"' in page.text
+    assert 'src="/static/energy.js"' in page.text
+    assert script.status_code == 200
+    assert energy_script.status_code == 200
+    assert 'endpoint: "/conversion-jobs/annual-energy"' in energy_script.text
+    assert 'legend.className = "power-curve-legend"' in energy_script.text
+    assert "137.508" in energy_script.text
+    assert 'id="energy_file_logs" class="conversion-file-logs"' in page.text
+    assert page.text.index('id="energy_file_logs"') < page.text.index('id="energy_status"')
+    assert "linearly interpolated" in page.text
+    assert "0.5 m/s wind-speed intervals" in page.text

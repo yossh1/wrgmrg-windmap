@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import math
 import re
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -29,6 +30,9 @@ class ResourceGrid:
     speeds: np.ndarray
     coordinate_crs: CRS | None = None
     source_format: str = "mrg"
+    sector_frequencies: np.ndarray | None = None
+    sector_scales: np.ndarray | None = None
+    sector_shapes: np.ndarray | None = None
 
 
 def _number(value: str, field: str) -> float:
@@ -169,6 +173,7 @@ def parse_mrg(path: str | Path) -> ResourceGrid:
 def parse_wrg(
     path: str | Path,
     utm_zone: str = DEFAULT_WRG_UTM_ZONE,
+    progress_callback: Callable[[int], None] | None = None,
 ) -> ResourceGrid:
     match = re.fullmatch(r"(?:[1-9]|[1-5][0-9]|60)([NS])", utm_zone.upper())
     if match is None:
@@ -206,6 +211,10 @@ def parse_wrg(
 
     data = np.full((ny, nx), np.nan, dtype=np.float32)
     seen = np.zeros((ny, nx), dtype=bool)
+    sector_frequencies: np.ndarray | None = None
+    sector_scales: np.ndarray | None = None
+    sector_shapes: np.ndarray | None = None
+    sector_count: int | None = None
     records = 0
     for line_number, line in enumerate(lines[1:], start=2):
         if not line.strip():
@@ -235,8 +244,72 @@ def parse_wrg(
             raise MascotFormatError(f"{line_number}行目の格子座標が重複しています。")
         seen[row, col] = True
         records += 1
+        if progress_callback is not None and (
+            records % max(1, nx * ny // 100) == 0 or records == nx * ny
+        ):
+            progress_callback(round(records / (nx * ny) * 100))
         if scale > 0 and shape > 0:
             data[row, col] = scale * math.gamma(1 + 1 / shape)
+        if len(tokens) == 7:
+            if sector_count is not None:
+                raise MascotFormatError(
+                    f"{line_number}行目の風向別ワイブルデータが他の格子と一致しません。"
+                )
+            continue
+        if len(tokens) < 9:
+            raise MascotFormatError(f"{line_number}行目の風向別ワイブルデータを読み取れません。")
+        try:
+            float(tokens[7])
+            count_value = float(tokens[8])
+            if not math.isfinite(count_value) or not count_value.is_integer():
+                raise ValueError
+            point_sector_count = int(count_value)
+        except ValueError as exc:
+            raise MascotFormatError(
+                f"{line_number}行目の風向数または風向別データが不正です。"
+            ) from exc
+        if point_sector_count < 1 or len(tokens) != 9 + point_sector_count * 3:
+            raise MascotFormatError(
+                f"{line_number}行目の風向別データ数が風向数と一致しません。"
+            )
+        if sector_count is None:
+            sector_count = point_sector_count
+            sector_frequencies = np.full((ny, nx, sector_count), np.nan, dtype=np.float64)
+            sector_scales = np.full((ny, nx, sector_count), np.nan, dtype=np.float64)
+            sector_shapes = np.full((ny, nx, sector_count), np.nan, dtype=np.float64)
+        elif point_sector_count != sector_count:
+            raise MascotFormatError(
+                f"{line_number}行目の風向数が他の格子と一致しません。"
+            )
+
+        assert sector_frequencies is not None
+        assert sector_scales is not None
+        assert sector_shapes is not None
+        try:
+            directional_values = np.asarray(
+                [float(value) for value in tokens[9:]],
+                dtype=np.float64,
+            ).reshape(sector_count, 3)
+        except ValueError as exc:
+            raise MascotFormatError(
+                f"{line_number}行目の風向別ワイブルデータを読み取れません。"
+            ) from exc
+        if not np.isfinite(directional_values).all():
+            raise MascotFormatError(f"{line_number}行目の風向別データに有限でない数値があります。")
+        frequencies = directional_values[:, 0] / 10
+        scales = directional_values[:, 1] / 10
+        shapes = directional_values[:, 2] / 100
+        if np.any(frequencies < 0) or np.any(
+            (frequencies > 0) & ((scales <= 0) | (shapes <= 0))
+        ):
+            raise MascotFormatError(
+                f"{line_number}行目の出現頻度または風向別ワイブルパラメーターが不正です。"
+            )
+        if frequencies.sum() <= 0:
+            raise MascotFormatError(f"{line_number}行目に有効な風向別出現頻度がありません。")
+        sector_frequencies[row, col] = frequencies
+        sector_scales[row, col] = scales
+        sector_shapes[row, col] = shapes
 
     if records != nx * ny:
         raise MascotFormatError(
@@ -244,6 +317,13 @@ def parse_wrg(
         )
     if not np.isfinite(data).any():
         raise MascotFormatError("有効なワイブルパラメーター（A > 0、k > 0）がありません。")
+    if sector_count is not None and (
+        sector_frequencies is None
+        or sector_scales is None
+        or sector_shapes is None
+        or np.isnan(sector_frequencies).any()
+    ):
+        raise MascotFormatError("すべてのWRG格子に風向別ワイブルデータが必要です。")
 
     return ResourceGrid(
         nx=nx,
@@ -257,18 +337,22 @@ def parse_wrg(
         speeds=data,
         coordinate_crs=CRS.from_epsg(epsg_code),
         source_format="wrg",
+        sector_frequencies=sector_frequencies,
+        sector_scales=sector_scales,
+        sector_shapes=sector_shapes,
     )
 
 
 def parse_resource_grid(
     path: str | Path,
     utm_zone: str = DEFAULT_WRG_UTM_ZONE,
+    progress_callback: Callable[[int], None] | None = None,
 ) -> ResourceGrid:
     suffix = Path(path).suffix.lower()
     if suffix == ".mrg":
         return parse_mrg(path)
     if suffix == ".wrg":
-        return parse_wrg(path, utm_zone)
+        return parse_wrg(path, utm_zone, progress_callback)
     raise MascotFormatError("入力ファイルは.mrgまたは.wrgを指定してください。")
 
 

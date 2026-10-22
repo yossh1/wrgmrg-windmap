@@ -14,10 +14,35 @@ const translations = {
     zoneNumber: "UTM zone番号",
     hemisphere: "半球",
     geotiffReady: (count) => `${count}個のWRGファイルを個別のGeoTIFFにします。`,
-    geotiffUploading: (count, percent) => `${count}個のファイルを送信中... ${percent}%`,
+    geotiffUploading: (count, percent, eta) => `${count}個のファイルをアップロード中... ${percent}%（全体 ${Math.round(percent * 0.1)}%）${eta}`,
     geotiffProcessing: (count, elapsed) => `${count}個のファイルを変換中です。経過時間: ${elapsed}秒`,
     geotiffComplete: (count) => `${count}個のGeoTIFFをZIPでダウンロードしました。`,
     geotiffError: "GeoTIFFを作成できませんでした。",
+    energyConverting: "発電量マップを作成中...",
+    energyDownload: "年間発電量GeoTIFFをZIPでダウンロード",
+    energyReady: (wrgCount, curveCount) => `${wrgCount}個のWRGと${curveCount}個のパワーカーブから${wrgCount * curveCount}個の年間発電量マップを作成します。`,
+    energyUploading: (wrgCount, curveCount, percent, eta) => `${wrgCount}個のWRGと${curveCount}個のパワーカーブ（計${wrgCount * curveCount}マップ分）をアップロード中... ${percent}%（全体 ${Math.round(percent * 0.1)}%）${eta}`,
+    energyProcessing: (count, elapsed) => `${count}個の年間発電量マップを計算中です。経過時間: ${elapsed}秒`,
+    energyComplete: (count) => `${count}個の年間発電量GeoTIFFをZIPでダウンロードしました。`,
+    energyError: "年間発電量マップを作成できませんでした。",
+    jobProgress: (stage, percent, eta) => `${stage} — 全体 ${percent}%${eta}`,
+    etaEstimating: "（残り時間を推定中）",
+    uploadLog: (count) => `${count}個の入力ファイルを送信中`,
+    uploadStage: "アップロード中",
+    overallUploading: "アップロード",
+    jobFileProgress: (name, stage, percent) => `${name} — ${stage} ${percent}%`,
+    jobStages: {
+      queued: "待機中", processing: "処理中", analysis: "解析中", parsing: "WRG解析中",
+      calculating: "発電量計算中", writing: "GeoTIFF書き出し中",
+      packaging: "ZIP格納中", complete: "完了", failed: "失敗",
+    },
+    powerCurveLoading: "パワーカーブを読み込み中...",
+    powerCurveReady: (count) => `${count}点のパワーカーブを表示しています。`,
+    powerCurvePreviewsReady: (curves, points) => `${curves}個のパワーカーブ（合計${points}点）をプレビューしています。`,
+    powerCurvePreviewLabel: "パワーカーブプレビュー",
+    powerCurveMissing: "CSVを選択すると、パワーカーブをプレビューします。",
+    powerCurveWindAxis: "風速 (m/s)",
+    powerCurvePowerAxis: "出力 (kW)",
     previewSuffix: "の風速コンター図",
     summary: (divisions, interval) => `${divisions}分割・${interval} m/s刻み`,
   },
@@ -35,33 +60,243 @@ const translations = {
     zoneNumber: "UTM zone number",
     hemisphere: "Hemisphere",
     geotiffReady: (count) => `A separate GeoTIFF will be created for each of the ${count} WRG files.`,
-    geotiffUploading: (count, percent) => `Uploading ${count} files... ${percent}%`,
+    geotiffUploading: (count, percent, eta) => `Uploading ${count} files... ${percent}% (overall ${Math.round(percent * 0.1)}%)${eta}`,
     geotiffProcessing: (count, elapsed) => `Converting ${count} files. Elapsed: ${elapsed}s`,
     geotiffComplete: (count) => `Downloaded a ZIP containing ${count} GeoTIFFs.`,
     geotiffError: "Could not create the GeoTIFFs.",
+    energyConverting: "Creating annual energy maps...",
+    energyDownload: "Download annual energy GeoTIFFs as ZIP",
+    energyReady: (wrgCount, curveCount) => `${wrgCount} WRG files × ${curveCount} power curves = ${wrgCount * curveCount} annual energy maps.`,
+    energyUploading: (wrgCount, curveCount, percent, eta) => `Uploading ${wrgCount} WRG files and ${curveCount} power curves (${wrgCount * curveCount} maps)... ${percent}% (overall ${Math.round(percent * 0.1)}%)${eta}`,
+    energyProcessing: (count, elapsed) => `Calculating ${count} annual energy maps. Elapsed: ${elapsed}s`,
+    energyComplete: (count) => `Downloaded a ZIP containing ${count} annual energy GeoTIFFs.`,
+    energyError: "Could not create the annual energy maps.",
+    jobProgress: (stage, percent, eta) => `${stage} — Overall ${percent}%${eta}`,
+    etaEstimating: " · estimating remaining time",
+    uploadLog: (count) => `Uploading ${count} input files`,
+    uploadStage: "Uploading",
+    overallUploading: "Upload",
+    jobFileProgress: (name, stage, percent) => `${name} — ${stage} ${percent}%`,
+    jobStages: {
+      queued: "Queued", processing: "Processing", analysis: "Analyzing", parsing: "Parsing WRG",
+      calculating: "Calculating AEP", writing: "Writing GeoTIFF",
+      packaging: "Adding files to ZIP", complete: "Complete", failed: "Failed",
+    },
+    powerCurveLoading: "Loading the power curve...",
+    powerCurveReady: (count) => `Showing ${count} power curve points.`,
+    powerCurvePreviewsReady: (curves, points) => `Previewing ${curves} power curves (${points} points total).`,
+    powerCurvePreviewLabel: "power curve preview",
+    powerCurveMissing: "Select a CSV file to preview the power curve.",
+    powerCurveWindAxis: "Wind speed (m/s)",
+    powerCurvePowerAxis: "Power (kW)",
     previewSuffix: " wind speed contour map",
     summary: (divisions, interval) => `${divisions} divisions · ${interval} m/s interval`,
   },
 };
 const languageInput = document.querySelector("#language");
 const currentLanguage = () => translations[languageInput.value];
-let geotiffProgressState = null;
-const updateGeotiffStatus = () => {
-  if (!geotiffProgressState) return;
-  const { phase, count, startedAt, percent = 0 } = geotiffProgressState;
-  const progress = document.querySelector("#geotiff_progress");
-  const status = document.querySelector("#geotiff_status");
-  if (phase === "uploading") {
-    progress.value = percent;
-    status.textContent = currentLanguage().geotiffUploading(count, percent);
-  } else if (phase === "processing") {
-    progress.removeAttribute("value");
-    const elapsed = Math.floor((Date.now() - startedAt) / 1000);
-    status.textContent = currentLanguage().geotiffProcessing(count, elapsed);
-  } else if (phase === "complete") {
-    progress.value = 100;
-    status.textContent = currentLanguage().geotiffComplete(count);
+const formatRemainingTime = (seconds) => {
+  if (!Number.isFinite(seconds) || seconds < 0) return "";
+  const rounded = Math.max(1, Math.round(seconds));
+  if (languageInput.value === "en") {
+    return rounded < 60 ? ` · about ${rounded}s remaining` : ` · about ${Math.ceil(rounded / 60)}m remaining`;
   }
+  return rounded < 60 ? `（残り約${rounded}秒）` : `（残り約${Math.ceil(rounded / 60)}分）`;
+};
+const estimateRemainingTime = (state) => {
+  const startedAt = state.overallStartedAt || state.uploadStartedAt;
+  const progress = state.phase === "uploading"
+    ? Math.round((state.uploadProgress || 0) * 0.1)
+    : state.progress;
+  if (!startedAt || progress <= 0 || progress >= 100) return null;
+  const elapsedSeconds = (Date.now() - startedAt) / 1000;
+  if (elapsedSeconds < 5) return null;
+  return {
+    seconds: elapsedSeconds * (100 - progress) / progress,
+  };
+};
+let geotiffProgressState = null;
+let energyProgressState = null;
+let powerCurvePreviewPhase = "missing";
+let currentPowerCurvePoints = [];
+const renderConversionProgress = (kind) => {
+  const state = kind === "geotiff" ? geotiffProgressState : energyProgressState;
+  if (!state) return;
+  const progress = document.querySelector(`#${kind}_progress`);
+  const status = document.querySelector(`#${kind}_status`);
+  const logs = document.querySelector(`#${kind}_file_logs`);
+  const renderLog = (name, stage, percent, error = "") => {
+    const item = document.createElement("li");
+    const nameCell = document.createElement("span");
+    nameCell.className = "conversion-file-name";
+    nameCell.textContent = name;
+    const stageCell = document.createElement("span");
+    stageCell.className = "conversion-file-stage";
+    stageCell.textContent =
+      `${stage} ${percent}%${error ? `: ${error}` : ""}`;
+    item.append(nameCell, stageCell);
+    logs.append(item);
+  };
+  if (state.phase === "uploading") {
+    logs.replaceChildren();
+    progress.value = Math.round((state.uploadProgress || 0) * 0.1);
+    const eta = estimateRemainingTime(state);
+    const uploadProgress = state.uploadProgress || 0;
+    const uploadName = kind === "geotiff"
+      ? currentLanguage().uploadLog(state.count)
+      : currentLanguage().uploadLog(state.wrgCount + state.curveCount);
+    renderLog(uploadName, currentLanguage().uploadStage, uploadProgress);
+    status.textContent = currentLanguage().jobProgress(
+      currentLanguage().overallUploading,
+      Math.round(uploadProgress * 0.1),
+      eta
+        ? formatRemainingTime(eta.seconds)
+        : currentLanguage().etaEstimating,
+    );
+    return;
+  }
+  progress.value = state.progress ?? 0;
+  if (state.phase === "complete") {
+    logs.replaceChildren();
+    for (const file of state.files || []) {
+      renderLog(
+        file.name,
+        currentLanguage().jobStages.complete,
+        100,
+      );
+    }
+    status.textContent = currentLanguage().jobProgress(
+      currentLanguage().jobStages.complete,
+      100,
+      "",
+    );
+    return;
+  }
+  const stage = currentLanguage().jobStages[state.stage] || state.stage;
+  const eta = estimateRemainingTime(state);
+  status.textContent = currentLanguage().jobProgress(
+    stage,
+    state.progress || 0,
+    eta
+      ? formatRemainingTime(eta.seconds)
+      : state.stage === "failed" || state.stage === "complete"
+        ? ""
+        : currentLanguage().etaEstimating,
+  );
+  logs.replaceChildren();
+  for (const file of state.files || []) {
+    const fileStage = currentLanguage().jobStages[file.stage] || file.stage;
+    renderLog(file.name, fileStage, file.progress, file.error);
+  }
+};
+const updateGeotiffStatus = () => {
+  renderConversionProgress("geotiff");
+};
+const updateEnergyStatus = () => {
+  renderConversionProgress("energy");
+};
+
+window.markConversionJobFailed = (kind) => {
+  const state = kind === "geotiff" ? geotiffProgressState : energyProgressState;
+  if (state) {
+    state.phase = "server";
+    state.stage = "failed";
+    renderConversionProgress(kind);
+  }
+};
+window.submitConversionJob = async ({
+  kind,
+  form,
+  formData,
+  endpoint,
+  filename,
+  jobCount,
+  wrgCount,
+  curveCount,
+}) => {
+  const inputCount = form.querySelector('input[type="file"][multiple]').files.length;
+  const startedAt = Date.now();
+  const state = {
+    phase: "uploading",
+    count: jobCount ?? inputCount,
+    wrgCount,
+    curveCount,
+    percent: 0,
+    uploadProgress: 0,
+    uploadedBytes: 0,
+    uploadTotal: 0,
+    uploadStartedAt: startedAt,
+    overallStartedAt: startedAt,
+    files: [],
+  };
+  if (kind === "geotiff") geotiffProgressState = state;
+  else energyProgressState = state;
+  document.querySelector(`#${kind}_progress_container`).hidden = false;
+  renderConversionProgress(kind);
+  const job = await new Promise((resolve, reject) => {
+    const request = new XMLHttpRequest();
+    request.open("POST", endpoint);
+    request.responseType = "json";
+    request.upload.addEventListener("progress", (event) => {
+      if (event.lengthComputable) {
+        state.uploadedBytes = event.loaded;
+        state.uploadTotal = event.total;
+        state.uploadProgress = Math.round((event.loaded / event.total) * 100);
+        renderConversionProgress(kind);
+      }
+    });
+    request.addEventListener("load", () => {
+      if (request.status < 200 || request.status >= 300) {
+        const detail = request.response?.detail;
+        reject(new Error(Array.isArray(detail)
+          ? detail.map((item) => item.msg).filter(Boolean).join("\n")
+          : detail || currentLanguage()[`${kind}Error`]));
+      } else {
+        resolve(request.response);
+      }
+    });
+    request.addEventListener("error", () => reject(new Error(currentLanguage()[`${kind}Error`])));
+    request.addEventListener("abort", () => reject(new Error(currentLanguage()[`${kind}Error`])));
+    request.send(formData);
+  });
+  state.phase = "server";
+  state.stage = "analysis";
+  state.progress = 10;
+  renderConversionProgress(kind);
+  let result;
+  do {
+    await new Promise((resolve) => window.setTimeout(resolve, 700));
+    const response = await fetch(`/conversion-jobs/${encodeURIComponent(job.id)}`);
+    if (!response.ok) throw new Error(currentLanguage()[`${kind}Error`]);
+    result = await response.json();
+    Object.assign(state, result, { phase: "server" });
+    renderConversionProgress(kind);
+    if (result.status === "failed") {
+      throw new Error(result.files.find((file) => file.error)?.error || result.error
+        || currentLanguage()[`${kind}Error`]);
+    }
+  } while (result.status !== "complete");
+  const downloadResponse = await fetch(
+    `/conversion-jobs/${encodeURIComponent(job.id)}/download`,
+  );
+  if (!downloadResponse.ok) throw new Error(currentLanguage()[`${kind}Error`]);
+  const blob = await downloadResponse.blob();
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement("a");
+  link.href = url;
+  const now = new Date();
+  const timestamp = [
+    now.getFullYear(), String(now.getMonth() + 1).padStart(2, "0"),
+    String(now.getDate()).padStart(2, "0"), "_",
+    String(now.getHours()).padStart(2, "0"),
+    String(now.getMinutes()).padStart(2, "0"),
+    String(now.getSeconds()).padStart(2, "0"),
+  ].join("");
+  link.download = `${timestamp}_${filename}`;
+  link.click();
+  URL.revokeObjectURL(url);
+  state.phase = "complete";
+  renderConversionProgress(kind);
 };
 const applyLanguage = () => {
   const language = languageInput.value;
@@ -79,10 +314,20 @@ const applyLanguage = () => {
   updateColorPreview();
   scheduleMapPreview();
   updateGeotiffStatus();
+  updateEnergyStatus();
+  if (window.renderPowerCurvePreviews) window.renderPowerCurvePreviews();
   const selectedWrgCount = document.querySelector("#wrg_files").files.length;
   if (selectedWrgCount) {
     document.querySelector("#geotiff_error").textContent =
       currentLanguage().geotiffReady(selectedWrgCount);
+  }
+  const selectedEnergyWrgCount = document.querySelector("#energy_wrg_files").files.length;
+  if (selectedEnergyWrgCount && !energyProgressState) {
+    document.querySelector("#energy_error").textContent =
+      currentLanguage().energyReady(
+        selectedEnergyWrgCount,
+        document.querySelector("#power_curve_files").files.length,
+      );
   }
 };
 const minimumInput = document.querySelector("#color_minimum");
@@ -272,6 +517,7 @@ document.querySelector("#form").addEventListener("submit", async (event) => {
     link.click();
     URL.revokeObjectURL(url);
   } catch (err) {
+    window.markConversionJobFailed("geotiff");
     error.textContent = err.message;
   } finally {
     button.disabled = false;
@@ -280,24 +526,23 @@ document.querySelector("#form").addEventListener("submit", async (event) => {
 });
 
 const selectTab = (tabId) => {
-  const colored = tabId === "colored-tab";
-  document.querySelector("#colored-tab").classList.toggle("active", colored);
-  document.querySelector("#colored-tab").setAttribute("aria-selected", String(colored));
-  document.querySelector("#geotiff-tab").classList.toggle("active", !colored);
-  document.querySelector("#geotiff-tab").setAttribute("aria-selected", String(!colored));
-  document.querySelector("#colored-panel").hidden = !colored;
-  document.querySelector("#geotiff-panel").hidden = colored;
+  for (const [id, panelId] of [
+    ["colored-tab", "colored-panel"],
+    ["mean-tab", "mean-panel"],
+    ["energy-tab", "energy-panel"],
+  ]) {
+    const selected = tabId === id;
+    document.querySelector(`#${id}`).classList.toggle("active", selected);
+    document.querySelector(`#${id}`).setAttribute("aria-selected", String(selected));
+    document.querySelector(`#${panelId}`).hidden = !selected;
+  }
 };
 document.querySelector("#colored-tab").addEventListener("click", () => selectTab("colored-tab"));
-document.querySelector("#geotiff-tab").addEventListener("click", () => selectTab("geotiff-tab"));
+document.querySelector("#mean-tab").addEventListener("click", () => selectTab("mean-tab"));
+document.querySelector("#energy-tab").addEventListener("click", () => selectTab("energy-tab"));
 
-const wrgFilesInput = document.querySelector("#wrg_files");
-const wrgFileSettings = document.querySelector("#wrg_file_settings");
-const renderWrgFileSettings = () => {
-  geotiffProgressState = null;
-  document.querySelector("#geotiff_progress_container").hidden = true;
-  wrgFileSettings.replaceChildren();
-  const files = Array.from(wrgFilesInput.files || []);
+const createWrgFileSettings = (files, settingsContainer) => {
+  settingsContainer.replaceChildren();
   files.forEach((file, index) => {
     const fieldset = document.createElement("fieldset");
     fieldset.className = "wrg-file-setting";
@@ -350,93 +595,56 @@ const renderWrgFileSettings = () => {
 
     controls.append(zoneField, hemisphereField);
     fieldset.append(controls);
-    wrgFileSettings.append(fieldset);
+    settingsContainer.append(fieldset);
   });
+};
+
+const wrgFilesInput = document.querySelector("#wrg_files");
+const energyWrgFilesInput = document.querySelector("#energy_wrg_files");
+const renderWrgFileSettings = () => {
+  geotiffProgressState = null;
+  document.querySelector("#geotiff_progress_container").hidden = true;
+  const files = Array.from(wrgFilesInput.files || []);
+  createWrgFileSettings(files, document.querySelector("#wrg_file_settings"));
   if (files.length) {
     document.querySelector("#geotiff_error").textContent =
       currentLanguage().geotiffReady(files.length);
   }
 };
 wrgFilesInput.addEventListener("change", renderWrgFileSettings);
+energyWrgFilesInput.addEventListener("change", () => {
+  energyProgressState = null;
+  document.querySelector("#energy_progress_container").hidden = true;
+  const files = Array.from(energyWrgFilesInput.files || []);
+  createWrgFileSettings(files, document.querySelector("#energy_wrg_file_settings"));
+  document.querySelector("#energy_error").textContent = files.length
+    ? currentLanguage().energyReady(
+      files.length,
+      document.querySelector("#power_curve_files").files.length,
+    )
+    : "";
+});
 
 document.querySelector("#geotiff_form").addEventListener("submit", async (event) => {
   event.preventDefault();
   const error = document.querySelector("#geotiff_error");
   const button = document.querySelector("#geotiff_submit");
-  const progressContainer = document.querySelector("#geotiff_progress_container");
-  const progress = document.querySelector("#geotiff_progress");
-  const count = wrgFilesInput.files.length;
   const formData = new FormData(event.target);
   error.textContent = "";
   button.disabled = true;
   wrgFilesInput.disabled = true;
   button.textContent = currentLanguage().geotiffConverting;
-  progressContainer.hidden = false;
-  progress.max = 100;
-  progress.value = 0;
-  geotiffProgressState = { phase: "uploading", count, startedAt: Date.now() };
-  updateGeotiffStatus();
-  const statusTimer = window.setInterval(updateGeotiffStatus, 1000);
   try {
-    const blob = await new Promise((resolve, reject) => {
-      const request = new XMLHttpRequest();
-      request.open("POST", "/convert-wrg-geotiffs");
-      request.responseType = "blob";
-      request.upload.addEventListener("progress", (uploadEvent) => {
-        if (uploadEvent.lengthComputable) {
-          geotiffProgressState.percent = Math.round(
-            (uploadEvent.loaded / uploadEvent.total) * 100,
-          );
-          updateGeotiffStatus();
-        }
-      });
-      request.upload.addEventListener("load", () => {
-        geotiffProgressState.phase = "processing";
-        updateGeotiffStatus();
-      });
-      request.addEventListener("load", async () => {
-        if (request.status < 200 || request.status >= 300) {
-          try {
-            const body = JSON.parse(await request.response.text());
-            const detail = Array.isArray(body.detail)
-              ? body.detail.map((item) => item.msg).filter(Boolean).join("\n")
-              : body.detail;
-            reject(new Error(detail || currentLanguage().geotiffError));
-          } catch (err) {
-            reject(err instanceof SyntaxError ? new Error(currentLanguage().geotiffError) : err);
-          }
-          return;
-        }
-        resolve(request.response);
-      });
-      request.addEventListener("error", () => reject(new Error(currentLanguage().geotiffError)));
-      request.addEventListener("abort", () => reject(new Error(currentLanguage().geotiffError)));
-      request.send(formData);
+    await window.submitConversionJob({
+      kind: "geotiff",
+      form: event.target,
+      formData,
+      endpoint: "/conversion-jobs/mean-wind-speed",
+      filename: "wind_speed_geotiffs.zip",
     });
-    const url = URL.createObjectURL(blob);
-    const link = document.createElement("a");
-    link.href = url;
-    const now = new Date();
-    const timestamp = [
-      now.getFullYear(),
-      String(now.getMonth() + 1).padStart(2, "0"),
-      String(now.getDate()).padStart(2, "0"),
-      "_",
-      String(now.getHours()).padStart(2, "0"),
-      String(now.getMinutes()).padStart(2, "0"),
-      String(now.getSeconds()).padStart(2, "0"),
-    ].join("");
-    link.download = `${timestamp}_wind_speed_geotiffs.zip`;
-    link.click();
-    URL.revokeObjectURL(url);
-    geotiffProgressState.phase = "complete";
-    updateGeotiffStatus();
   } catch (err) {
     error.textContent = err.message;
-    geotiffProgressState = null;
-    progressContainer.hidden = true;
   } finally {
-    window.clearInterval(statusTimer);
     button.disabled = false;
     wrgFilesInput.disabled = false;
     button.textContent = currentLanguage().geotiffDownload;

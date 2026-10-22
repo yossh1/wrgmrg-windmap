@@ -18,7 +18,8 @@
     <h1 data-ja="風況解析GIS変換アプリ" data-en="Wind Resource GIS Converter">風況解析GIS変換アプリ</h1>
     <div class="tab-list" role="tablist" aria-label="変換モード" data-ja-aria="変換モード" data-en-aria="Conversion mode">
       <button id="colored-tab" class="tab-button active" type="button" role="tab" aria-selected="true" aria-controls="colored-panel" data-ja="色付きマップ" data-en="Colored map">色付きマップ</button>
-      <button id="geotiff-tab" class="tab-button" type="button" role="tab" aria-selected="false" aria-controls="geotiff-panel" data-ja="WRG → GeoTIFF" data-en="WRG → GeoTIFF">WRG → GeoTIFF</button>
+      <button id="mean-tab" class="tab-button" type="button" role="tab" aria-selected="false" aria-controls="mean-panel" data-ja="WRG → 平均風速" data-en="WRG → Mean wind speed">WRG → 平均風速</button>
+      <button id="energy-tab" class="tab-button" type="button" role="tab" aria-selected="false" aria-controls="energy-panel" data-ja="WRG → AEP" data-en="WRG → AEP">WRG → AEP</button>
     </div>
     <section id="colored-panel" role="tabpanel" aria-labelledby="colored-tab">
       <p class="note" data-ja="MASCOTから出力される .mrg ファイル、または汎用の風況解析シミュレーションで使われる .wrg ファイルを読み込み、各格子のワイブルパラメーターから平均風速を計算します。" data-en="Load .mrg files exported by MASCOT or .wrg files used by general-purpose wind resource simulation software, and calculate mean wind speed from the Weibull parameters at each grid point.">MASCOTから出力される .mrg ファイル、または汎用の風況解析シミュレーションで使われる .wrg ファイルを読み込み、各格子のワイブルパラメーターから平均風速を計算します。</p>
@@ -101,7 +102,8 @@ __UTM_ZONE_OPTIONS__
     </form>
     <p id="error" role="alert"></p>
     </section>
-    <section id="geotiff-panel" role="tabpanel" aria-labelledby="geotiff-tab" hidden>
+    <section id="mean-panel" role="tabpanel" aria-labelledby="mean-tab" hidden>
+    <hr>
       <p class="note" data-ja="複数のWRGを選択すると、各ファイルの平均風速を個別のGeoTIFFにしてZIPで出力します。色分けスタイルは含めません。" data-en="Select multiple WRG files to create a separate mean wind speed GeoTIFF for each file. The ZIP does not include color styles.">複数のWRGを選択すると、各ファイルの平均風速を個別のGeoTIFFにしてZIPで出力します。色分けスタイルは含めません。</p>
       <form id="geotiff_form">
         <label for="wrg_files" data-ja="WRGファイル（複数選択可）" data-en="WRG files (select multiple)">WRGファイル（複数選択可）</label>
@@ -110,13 +112,37 @@ __UTM_ZONE_OPTIONS__
         <button id="geotiff_submit" type="submit" data-ja="GeoTIFFをZIPでダウンロード" data-en="Download GeoTIFFs as ZIP">GeoTIFFをZIPでダウンロード</button>
         <div id="geotiff_progress_container" class="conversion-progress" hidden>
           <progress id="geotiff_progress" max="100" value="0" aria-label="変換の進捗"></progress>
-          <p id="geotiff_status" role="status" aria-live="polite"></p>
+          <ol id="geotiff_file_logs" class="conversion-file-logs"></ol>
+          <p id="geotiff_status" class="conversion-overall-status" role="status" aria-live="polite"></p>
         </div>
       </form>
       <p id="geotiff_error" role="alert"></p>
     </section>
+    <section id="energy-panel" role="tabpanel" aria-labelledby="energy-tab" hidden>
+      <p class="note" data-ja="WRGの風向別ワイブル分布と風車のパワーカーブから、損失を含まない理論年間発電量（MWh/年）を各格子で計算します。計算刻みは0.5 m/sです。ハブ高はWRGと同じと仮定し、ウェイク・設備利用可能率・電気損失は考慮しません。WRGの風向数は任意です。" data-en="Calculate gross theoretical annual energy (MWh/year) at each grid point from the WRG sector-wise Weibull distributions and a turbine power curve, using 0.5 m/s wind-speed intervals. Hub height is assumed to match the WRG reference height. Wake, availability, and electrical losses are not included. Any number of WRG wind-direction sectors is supported.">WRGの風向別ワイブル分布と風車のパワーカーブから、損失を含まない理論年間発電量（MWh/年）を各格子で計算します。計算刻みは0.5 m/sです。ハブ高はWRGと同じと仮定し、ウェイク・設備利用可能率・電気損失は考慮しません。WRGの風向数は任意です。</p>
+      <form id="energy_form">
+        <label for="energy_wrg_files" data-ja="WRGファイル（複数選択可）" data-en="WRG files (select multiple)">WRGファイル（複数選択可）</label>
+        <input id="energy_wrg_files" name="wrg_files" type="file" accept=".wrg" multiple required>
+        <div id="energy_wrg_file_settings"></div>
+        <label for="power_curve_files" data-ja="パワーカーブCSV（複数選択可。1列目：風速 m/s、2列目：出力 kW）" data-en="Power curve CSV files (select multiple; column 1: wind speed in m/s, column 2: power in kW)">パワーカーブCSV（複数選択可。1列目：風速 m/s、2列目：出力 kW）</label>
+        <input id="power_curve_files" name="power_curve_files" type="file" accept=".csv,text/csv" multiple required>
+        <p class="note" data-ja="カンマ・タブ・セミコロン区切り、ヘッダーあり／なしに対応します。点の間は線形補間し、CSVの風速範囲外は0 kWとして計算します。" data-en="Comma, tab, or semicolon delimiters are supported, with or without a header. Values between points are linearly interpolated; wind speeds outside the CSV range produce 0 kW.">カンマ・タブ・セミコロン区切り、ヘッダーあり／なしに対応します。点の間は線形補間し、CSVの風速範囲外は0 kWとして計算します。</p>
+        <section class="power-curve-preview" aria-label="パワーカーブプレビュー" data-ja-aria="パワーカーブプレビュー" data-en-aria="Power curve preview">
+          <p id="power_curve_status" class="map-preview-status" role="status" data-ja="CSVを選択すると、パワーカーブをプレビューします。" data-en="Select a CSV file to preview the power curve.">CSVを選択すると、パワーカーブをプレビューします。</p>
+          <div id="power_curve_previews"></div>
+        </section>
+        <button id="energy_submit" type="submit" data-ja="年間発電量GeoTIFFをZIPでダウンロード" data-en="Download annual energy GeoTIFFs as ZIP">年間発電量GeoTIFFをZIPでダウンロード</button>
+        <div id="energy_progress_container" class="conversion-progress" hidden>
+          <progress id="energy_progress" max="100" value="0" aria-label="変換の進捗"></progress>
+          <ol id="energy_file_logs" class="conversion-file-logs"></ol>
+          <p id="energy_status" class="conversion-overall-status" role="status" aria-live="polite"></p>
+        </div>
+      </form>
+      <p id="energy_error" role="alert"></p>
+    </section>
   </main>
   <script>window.WIND_CONFIG = __WIND_CONFIG__;</script>
   <script src="/static/app.js" defer></script>
+  <script src="/static/energy.js" defer></script>
 </body>
 </html>

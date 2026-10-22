@@ -7,7 +7,7 @@ A web application that calculates mean wind speed from wind resource data and cr
 ## Supported files
 
 - **`.mrg`** — A resource-grid file exported by MASCOT. It contains grid locations and the Weibull parameters for each grid point.
-- **`.wrg`** — A grid file used by general-purpose wind-resource simulation software. It contains UTM coordinates and Weibull parameters for each grid point. Select the UTM zone and hemisphere after uploading. The default is **54N**. UTM is valid between 80°S and 84°N.
+- **`.wrg`** — A grid file used by wind-resource simulation software. In addition to UTM coordinates and the all-direction Weibull parameters, it may contain sector frequency and Weibull parameters for any number of wind directions. Select the UTM zone and hemisphere after uploading. The default is **54N**. UTM is valid between 80°S and 84°N.
 
 For both formats, the application calculates mean wind speed from the all-direction Weibull scale `A` and shape `k` at each grid point:
 
@@ -67,12 +67,23 @@ Open `http://localhost:8000`, select an input file and configure the settings, t
 
 The downloaded ZIP filename starts with the download computer's local date and time (`YYYYMMDD_HHMMSS`), for example `YYYYMMDD_HHMMSS_mascot_wind_contours.zip`. Uploaded files are deleted after processing and are not retained by the application.
 
-### WRG → GeoTIFF tab
+### WRG → Mean wind speed tab
 
-- Select one or more `.wrg` files. Set the UTM zone number and hemisphere for each file (defaults: **54N**).
+- Select one or more `.wrg` files to create separate mean-wind-speed GeoTIFFs. Set the UTM zone number and hemisphere for each file (defaults: **54N**).
 - Each file is converted independently into one single-band Float32 GeoTIFF containing mean wind speed in m/s. No color style is applied, so you can style each raster in QGIS.
-- Download the GeoTIFF files together in a ZIP. Output names are based on the input filenames; duplicate names receive a numeric suffix.
+- Files are processed in parallel. Per-file parsing and conversion progress is shown, followed by ZIP creation; the download starts when progress reaches 100%. Output names are based on the input filenames; duplicate names receive a numeric suffix.
 - The output CRS is the selected WGS 84 / UTM zone for each file.
+
+### WRG → AEP tab
+
+- Select one or more `.wrg` files and one or more power-curve CSV files. A map is created for every WRG/CSV combination.
+- Output GeoTIFF names follow `WRG_filename_power_curve_filename.tif`, with numeric suffixes for duplicate names. A preview is shown for each selected curve.
+- The CSV uses wind speed in m/s in column 1 and power in kW in column 2. A header is optional; comma, tab, and semicolon delimiters are supported. Irregularly spaced points are linearly interpolated, and wind speeds outside the entered range produce 0 kW.
+- A preview chart is shown for each selected CSV.
+- The annual-energy GeoTIFFs use the WRG's sector frequencies and Weibull A/k parameters. Any sector count is supported. The calculation integrates probability in 0.5 m/s wind-speed intervals and reports annual energy in **MWh/year**, with 8,760 hours per year.
+- Results are gross theoretical estimates with no wake, availability, or electrical losses; turbine hub height is assumed to match the WRG reference height.
+- Files are processed in parallel. Per-file parsing, AEP calculation, and GeoTIFF writing progress is shown; the ZIP download starts at 100%.
+- One GeoTIFF is created per WRG/CSV combination, using the WRG's selected WGS 84 / UTM CRS. The files are bundled in a ZIP.
 
 ## Output files
 
@@ -89,6 +100,7 @@ The KMZ overlay and contour lines are placed at altitude 0 m (KML `absolute`). T
 
 - `app/main.py` — FastAPI routes and request handling.
 - `app/grid.py` — MRG/WRG parsing and coordinate reference handling.
+- `app/energy.py` — Power curve parsing and sector-wise annual energy calculations.
 - `app/visualization.py` — Wind-speed palettes, contour lines, and map preview.
 - `app/exports.py` — GeoTIFF, QML, GeoJSON, and KMZ generation.
 - `app/settings.py` — Application defaults.
@@ -115,7 +127,7 @@ This project is distributed under the [MIT License](./LICENSE).
 ## 対応ファイル
 
 - **`.mrg`** — MASCOTから出力されるリソースグリッドファイルです。格子ごとのワイブルパラメーターと位置情報を読み取ります。
-- **`.wrg`** — 汎用の風況解析シミュレーションで使われるグリッド形式のファイルです。格子ごとのワイブルパラメーターとUTM座標を読み取ります。アップロード後にUTM zone 1〜60と北半球（N）・南半球（S）を選択してください。初期値は54Nです。UTMの適用範囲（南緯80°〜北緯84°）内で利用できます。
+- **`.wrg`** — 風況解析シミュレーションで使われるグリッド形式のファイルです。UTM座標と全方位ワイブルパラメーターに加え、任意の風向数に対応したセクター別出現頻度・ワイブルパラメーターを含む場合があります。アップロード後にUTM zone 1〜60と北半球（N）・南半球（S）を選択してください。初期値は54Nです。UTMの適用範囲（南緯80°〜北緯84°）内で利用できます。
 
 どちらの形式も、各格子の全方位ワイブルパラメーターから平均風速を計算し、GISデータに変換します。
 
@@ -127,7 +139,7 @@ This project is distributed under the [MIT License](./LICENSE).
 平均風速 [m/s] = A × Γ(1 + 1/k)
 ```
 
-`.mrg` ではヘッダーに含まれる格子数・間隔・南西端の日本測地系緯度経度を使います。`.wrg` では1行目の格子数・南西端UTM座標・格子間隔と各`GridPoint`の全方位ワイブル尺度A・形状kを使います。
+`.mrg` ではヘッダーに含まれる格子数・間隔・南西端の日本測地系緯度経度を使います。`.wrg` では1行目の格子数・南西端UTM座標・格子間隔と各`GridPoint`の全方位ワイブル尺度A・形状kを読み取ります。発電量計算では、各格子行の風向数に続くセクター別出現頻度とA・kも使います。
 
 `.mrg` の南西端の緯度・経度は日本測地系（Tokyo Datum、EPSG:4301）として読み込み、PROJの座標変換を使ってWGS 84（EPSG:4326）に変換します。MASCOTのX/Y格子間隔はメートル単位で扱い、変換後の南西端を原点とする局所方位等距離図法（AEQD）に配置します。`.wrg` は選択したUTM zone 1〜60と半球に対応するWGS 84 / UTM座標系を使用します（北半球 EPSG:32601〜32660、南半球 EPSG:32701〜32760）。`.wrg`に測地系の識別情報がないため、WGS 84を前提にします。KMZとGeoJSONはどちらの形式もWGS 84で出力します。
 
@@ -175,12 +187,26 @@ docker compose up --build
 
 ZIPのファイル名には、ダウンロードしたPCの年月日と時刻（`YYYYMMDD_HHMMSS`）が先頭に付きます（例：`YYYYMMDD_HHMMSS_mascot_wind_contours.zip`）。アップロードした入力ファイルは変換後に削除され、アプリには保存されません。
 
-#### WRG → GeoTIFFタブ
+#### 色付きマップタブ
 
-- `.wrg`を1つ以上選択します。各ファイルごとにUTM zone番号と半球を指定します（初期値は **54N**）。
+- 単一の`.mrg`または`.wrg`から、色付きコンター図・GeoTIFF・QML・GeoJSON・KMZを出力します。入力形式に応じた座標系や色分け・凡例の設定を指定できます。
+
+#### WRG → 平均風速タブ
+
+- `.wrg`を1つ以上選択し、各ファイルのUTM zone番号と半球を指定します（初期値は **54N**）。
 - ファイルごとに独立した単バンドFloat32 GeoTIFFを1つ作成し、平均風速（m/s）を格納します。色分けスタイルは付けないため、QGIS側で自由に設定できます。
-- 作成したGeoTIFFはZIPでまとめてダウンロードできます。ファイル名は入力ファイル名を基にし、重複時は番号を付けて区別します。
+- 進捗バーはアップロード10%、解析・GeoTIFF作成80%、ZIP格納10%で計算し、工程別の進捗と、処理状況に基づく残り時間の概算を表示します。複数ファイルは論理CPU数を上限に並列処理し、WRGごとの状況も表示します。ZIP格納が完了して100%になるとダウンロードします。ファイル名は入力ファイル名を基にし、重複時は番号を付けて区別します。
+- 1つのWRGの解析自体は逐次処理ですが、AEP計算は1ファイルの場合も格子行を分割して並列化します。そのため、WRGの解析中はCPU使用率が上がりきらないことがあります。
 - 各GeoTIFFは、そのファイルで選択したWGS 84 / UTM座標系を持ちます。
+
+#### WRG → AEPタブ
+
+- `.wrg`とパワーカーブCSVをそれぞれ1つ以上選択します。すべてのWRGとCSVの組み合わせで年間発電量マップを作成します。CSVの1列目は風速（m/s）、2列目は出力（kW）です。ヘッダーは任意で、カンマ・タブ・セミコロン区切りに対応します。
+- 出力GeoTIFF名は`WRGのファイル名_パワーカーブCSVのファイル名.tif`です（例：`windfarm_turbineA.tif`）。同名になる場合は番号を付けて区別します。選択したパワーカーブは1つのグラフで色分けして表示し、凡例にCSV名を表示します。
+- CSVに記載した点の間は線形補間し、最小・最大風速の範囲外は0 kWとして扱います。複数のパワーカーブは1つのグラフに重ねて表示し、CSVごとに色分けした凡例を付けます。
+- WRGの風向別出現頻度とワイブルA・kから、0.5 m/s刻みで期待出力を計算し、年8,760時間として年間発電量を**MWh/年**でGeoTIFFに出力します。12方位・16方位を含む任意の風向数に対応します。
+- 損失を含まない理論値です。ウェイク、設備利用可能率、電気損失は考慮せず、ハブ高はWRGの評価高さと同じと仮定します。
+- 進捗ログは個別ファイルの状況を先に並べ、状態表示の開始位置を揃えます。その下に全体進捗と残り時間の概算を表示します。進捗バーはアップロード10%、解析・計算・GeoTIFF作成80%、ZIP格納10%で、100%になるとダウンロードします。複数ファイルは論理CPU数を上限に並列処理し、単一ファイルのAEP計算も格子行単位で並列化します。
 
 ## テスト
 
@@ -214,6 +240,7 @@ python -m pytest -q
 
 - `app/main.py` — FastAPIの画面・変換APIとリクエスト処理
 - `app/grid.py` — MRG/WRGの読み込みと座標系の処理
+- `app/energy.py` — パワーカーブの読み込みと風向別年間発電量の計算
 - `app/visualization.py` — 風速カラーマップ、コンター線、プレビュー描画
 - `app/exports.py` — GeoTIFF・QML・GeoJSON・KMZの生成
 - `app/settings.py` — アプリの初期設定

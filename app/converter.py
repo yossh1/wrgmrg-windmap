@@ -1,6 +1,7 @@
 """Public conversion API, assembled from focused parsing, rendering, and export modules."""
 
 from app.exports import create_exports, create_wind_speed_geotiff
+from app.energy import calculate_annual_energy, parse_power_curve, write_annual_energy_geotiff
 from app.grid import (
     MascotFormatError,
     ResourceGrid,
@@ -27,11 +28,14 @@ __all__ = [
     "MAX_COLOR_DIVISIONS",
     "MascotFormatError",
     "ResourceGrid",
+    "calculate_annual_energy",
     "create_exports",
     "create_wind_speed_geotiff",
+    "parse_power_curve",
     "parse_mrg",
     "parse_resource_grid",
     "parse_wrg",
     "render_map_preview",
+    "write_annual_energy_geotiff",
     "wind_color_palette",
 ]
