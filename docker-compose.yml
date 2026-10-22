@@ -1,5 +1,6 @@
 services:
   mascot-wind-converter:
+    container_name: wrgmrg-windmap
     build: .
     ports:
       - "8000:8000"
