@@ -21,6 +21,7 @@ from app.converter import (
     MascotFormatError,
     _contour_levels,
     create_exports,
+    create_wind_speed_geotiff,
     parse_mrg,
     parse_resource_grid,
     parse_wrg,
@@ -275,6 +276,22 @@ def test_create_exports_writes_georeferenced_raster_and_contours(tmp_path: Path)
     assert len({item.get("color") for item in items}) == 10
 
 
+def test_create_wind_speed_geotiff_writes_unstyled_float_raster(tmp_path: Path) -> None:
+    source = tmp_path / "wind.wrg"
+    make_wrg(source)
+    grid = parse_wrg(source, "54S")
+    path = create_wind_speed_geotiff(grid, tmp_path / "exports" / "wind.tif")
+
+    with rasterio.open(path) as raster:
+        assert raster.crs.to_epsg() == 32754
+        assert (raster.width, raster.height) == (3, 2)
+        assert raster.dtypes == ("float32",)
+        assert raster.descriptions == ("Weibull mean wind speed (m/s)",)
+        assert raster.tags()["source_format"] == "wrg"
+        assert "wind_color_minimum_m_s" not in raster.tags()
+        assert raster.read(1)[1, 0] == pytest.approx(9.26 * math.gamma(1 + 1 / 1.95))
+
+
 def test_web_form_returns_downloadable_archive(tmp_path: Path) -> None:
     client = TestClient(app)
     page = client.get("/")
@@ -283,6 +300,19 @@ def test_web_form_returns_downloadable_archive(tmp_path: Path) -> None:
     assert page.status_code == 200
     assert browser_script.status_code == 200
     assert browser_styles.status_code == 200
+    assert 'role="tablist"' in page.text
+    assert 'id="geotiff-panel" role="tabpanel"' in page.text
+    assert 'name="wrg_files" type="file" accept=".wrg" multiple required' in page.text
+    assert 'zoneSelect.name = "utm_zones"' in browser_script.text
+    assert 'hemisphereSelect.name = "utm_hemispheres"' in browser_script.text
+    assert browser_script.text.index(
+        "const formData = new FormData(event.target)"
+    ) < browser_script.text.index("wrgFilesInput.disabled = true")
+    assert "request.send(formData)" in browser_script.text
+    assert 'request.open("POST", "/convert-wrg-geotiffs")' in browser_script.text
+    assert 'request.upload.addEventListener("progress"' in browser_script.text
+    assert 'id="geotiff_progress" max="100" value="0"' in page.text
+    assert 'id="geotiff_status" role="status" aria-live="polite"' in page.text
     assert 'href="/static/app.css"' in page.text
     assert 'src="/static/app.js"' in page.text
     assert "window.WIND_CONFIG" in browser_script.text
@@ -608,6 +638,91 @@ def test_web_form_previews_and_exports_wrg_input(tmp_path: Path) -> None:
         with rasterio.MemoryFile(archive.read("wind_speed.tif")) as memory_file:
             with memory_file.open() as raster:
                 assert raster.crs.to_epsg() == 32654
+
+
+def test_web_form_exports_one_geotiff_per_wrg_with_individual_crs(tmp_path: Path) -> None:
+    source = tmp_path / "sample.wrg"
+    make_wrg(source)
+    content = source.read_bytes()
+    response = TestClient(app).post(
+        "/convert-wrg-geotiffs",
+        files=[
+            ("wrg_files", ("north.wrg", content, "text/plain")),
+            ("wrg_files", ("south.wrg", content, "text/plain")),
+        ],
+        data={"utm_zones": ["54", "54"], "utm_hemispheres": ["N", "S"]},
+    )
+
+    assert response.status_code == 200
+    assert response.headers["content-type"] == "application/zip"
+    with zipfile.ZipFile(io.BytesIO(response.content)) as archive:
+        assert archive.namelist() == ["north.tif", "south.tif"]
+        for name, epsg in (("north.tif", 32654), ("south.tif", 32754)):
+            with rasterio.MemoryFile(archive.read(name)) as memory_file:
+                with memory_file.open() as raster:
+                    assert raster.crs.to_epsg() == epsg
+                    assert raster.dtypes == ("float32",)
+                    assert "wind_color_minimum_m_s" not in raster.tags()
+
+
+def test_web_form_disambiguates_duplicate_geotiff_names(tmp_path: Path) -> None:
+    source = tmp_path / "wind.wrg"
+    make_wrg(source)
+    response = TestClient(app).post(
+        "/convert-wrg-geotiffs",
+        files=[
+            ("wrg_files", ("wind.wrg", source.read_bytes(), "text/plain")),
+            ("wrg_files", ("wind.wrg", source.read_bytes(), "text/plain")),
+        ],
+        data={"utm_zones": ["54", "54"], "utm_hemispheres": ["N", "N"]},
+    )
+
+    assert response.status_code == 200
+    with zipfile.ZipFile(io.BytesIO(response.content)) as archive:
+        assert archive.namelist() == ["wind.tif", "wind_2.tif"]
+
+
+def test_web_form_rejects_non_wrg_for_geotiff_export(tmp_path: Path) -> None:
+    source = tmp_path / "grid.mrg"
+    make_mrg(source, [
+        "-3000 -3000 100 4 2",
+        "-3000 -2975 101 6 2",
+        "-2975 -3000 102 8 2",
+        "-2975 -2975 103 10 2",
+    ])
+    response = TestClient(app).post(
+        "/convert-wrg-geotiffs",
+        files=[("wrg_files", ("grid.mrg", source.read_bytes(), "text/plain"))],
+        data={"utm_zones": ["54"], "utm_hemispheres": ["N"]},
+    )
+
+    assert response.status_code == 400
+    assert ".wrg" in response.json()["detail"]
+
+
+def test_web_form_requires_valid_utm_settings_for_each_wrg(tmp_path: Path) -> None:
+    source = tmp_path / "wind.wrg"
+    make_wrg(source)
+    content = source.read_bytes()
+    files = [
+        ("wrg_files", ("first.wrg", content, "text/plain")),
+        ("wrg_files", ("second.wrg", content, "text/plain")),
+    ]
+
+    mismatched_settings = TestClient(app).post(
+        "/convert-wrg-geotiffs",
+        files=files,
+        data={"utm_zones": ["54"], "utm_hemispheres": ["N", "S"]},
+    )
+    assert mismatched_settings.status_code == 400
+
+    invalid_zone = TestClient(app).post(
+        "/convert-wrg-geotiffs",
+        files=files,
+        data={"utm_zones": ["54", "61"], "utm_hemispheres": ["N", "S"]},
+    )
+    assert invalid_zone.status_code == 400
+    assert "UTM" in invalid_zone.json()["detail"]
 
 
 def test_web_form_rejects_unsupported_file_extension() -> None:

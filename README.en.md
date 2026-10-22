@@ -67,6 +67,13 @@ Open `http://localhost:8000`, select an input file and configure the settings, t
 
 The downloaded ZIP filename starts with the download computer's local date and time (`YYYYMMDD_HHMMSS`), for example `YYYYMMDD_HHMMSS_mascot_wind_contours.zip`. Uploaded files are deleted after processing and are not retained by the application.
 
+### WRG → GeoTIFF tab
+
+- Select one or more `.wrg` files. Choose the UTM zone number and hemisphere for each file (default: **54N**).
+- Each file is converted independently into one single-band Float32 GeoTIFF containing mean wind speed in m/s. No color style is applied, so you can style each raster in QGIS.
+- Download the GeoTIFF files together in a ZIP. Output names are based on the input filenames; duplicate names receive a numeric suffix.
+- Each GeoTIFF uses the WGS 84 / UTM CRS selected for its WRG file.
+
 ## Output files
 
 Extract the downloaded ZIP:

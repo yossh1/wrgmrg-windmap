@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import logging
 import math
+import re
 import tempfile
 import zipfile
 from pathlib import Path
@@ -21,6 +22,7 @@ from app.converter import (
     MascotFormatError,
     ResourceGrid,
     create_exports,
+    create_wind_speed_geotiff,
     parse_resource_grid,
     render_map_preview,
     wind_color_palette,
@@ -69,6 +71,20 @@ PAGE = _render_page()
 @app.get("/", response_class=HTMLResponse)
 def index() -> str:
     return PAGE
+
+
+def _safe_geotiff_name(filename: str, used_names: set[str]) -> str:
+    stem = Path(filename).stem
+    safe_stem = re.sub(r"[^\w.-]", "_", stem, flags=re.UNICODE).strip("._")
+    if not safe_stem:
+        safe_stem = "wind_speed"
+    candidate = f"{safe_stem}.tif"
+    suffix = 2
+    while candidate.casefold() in used_names:
+        candidate = f"{safe_stem}_{suffix}.tif"
+        suffix += 1
+    used_names.add(candidate.casefold())
+    return candidate
 
 
 def _resolve_contour_interval(
@@ -226,4 +242,52 @@ def convert(
         content=content,
         media_type="application/zip",
         headers={"Content-Disposition": 'attachment; filename="mascot_wind_contours.zip"'},
+    )
+
+
+@app.post("/convert-wrg-geotiffs")
+def convert_wrg_geotiffs(
+    wrg_files: list[UploadFile] = File(...),
+    utm_zones: list[int] = Form(...),
+    utm_hemispheres: list[str] = Form(...),
+) -> Response:
+    if len(wrg_files) != len(utm_zones) or len(wrg_files) != len(utm_hemispheres):
+        raise HTTPException(status_code=400, detail="各WRGファイルのUTM zoneと半球を指定してください。")
+    for uploaded_file in wrg_files:
+        if Path(uploaded_file.filename or "").suffix.lower() != ".wrg":
+            raise HTTPException(status_code=400, detail="WRG GeoTIFF出力には.wrgファイルのみ指定できます。")
+
+    with tempfile.TemporaryDirectory(prefix="mascot-wrg-geotiff-") as temporary:
+        work_dir = Path(temporary)
+        archive_path = work_dir / "wind_speed_geotiffs.zip"
+        used_names: set[str] = set()
+        try:
+            with zipfile.ZipFile(archive_path, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+                for index, (uploaded_file, zone, hemisphere) in enumerate(
+                    zip(wrg_files, utm_zones, utm_hemispheres, strict=True)
+                ):
+                    input_path = work_dir / f"input_{index}.wrg"
+                    with input_path.open("wb") as target:
+                        while chunk := uploaded_file.file.read(1024 * 1024):
+                            target.write(chunk)
+                    grid = _parse_uploaded_grid(input_path, zone, hemisphere)
+                    geotiff_path = work_dir / _safe_geotiff_name(
+                        uploaded_file.filename or "",
+                        used_names,
+                    )
+                    create_wind_speed_geotiff(grid, geotiff_path)
+                    archive.write(geotiff_path, geotiff_path.name)
+            content = archive_path.read_bytes()
+        except HTTPException:
+            raise
+        except MascotFormatError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        except Exception:
+            logger.exception("Unexpected error while creating WRG GeoTIFFs")
+            raise
+
+    return Response(
+        content=content,
+        media_type="application/zip",
+        headers={"Content-Disposition": 'attachment; filename="wind_speed_geotiffs.zip"'},
     )

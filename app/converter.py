@@ -1,6 +1,6 @@
 """Public conversion API, assembled from focused parsing, rendering, and export modules."""
 
-from app.exports import create_exports
+from app.exports import create_exports, create_wind_speed_geotiff
 from app.grid import (
     MascotFormatError,
     ResourceGrid,
@@ -28,6 +28,7 @@ __all__ = [
     "MascotFormatError",
     "ResourceGrid",
     "create_exports",
+    "create_wind_speed_geotiff",
     "parse_mrg",
     "parse_resource_grid",
     "parse_wrg",

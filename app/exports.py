@@ -245,6 +245,81 @@ def _write_kmz(
             archive.write(legend_title_path, "wind_legend_title.png")
 
 
+def _write_geotiff(
+    grid: ResourceGrid,
+    path: Path,
+    color_minimum: float | None = None,
+    color_maximum: float | None = None,
+    color_divisions: int | None = None,
+    opacity_percent: int | None = None,
+) -> None:
+    longitude, latitude, datum_transform = _wgs84_anchor(grid)
+    crs = _local_crs(grid)
+    origin_x = grid.sw_x if grid.coordinate_crs is not None else 0.0
+    origin_y = grid.sw_y if grid.coordinate_crs is not None else 0.0
+    transform = from_origin(
+        origin_x - grid.dx / 2,
+        origin_y + (grid.ny - 0.5) * grid.dy,
+        grid.dx,
+        grid.dy,
+    )
+    source_datum = (
+        f"{grid.coordinate_crs.name} (EPSG:{grid.coordinate_crs.to_epsg()})"
+        if grid.coordinate_crs is not None
+        else "Tokyo Datum (EPSG:4301)"
+    )
+    tags = {
+        "wind_speed_formula": "A * Gamma(1 + 1/k)",
+        "source": f"MASCOT .{grid.source_format} all-directions Weibull A and k",
+        "source_format": grid.source_format,
+        "source_horizontal_datum": source_datum,
+        "output_horizontal_datum": "WGS 84 (EPSG:4326)",
+        "datum_transform": datum_transform.description,
+        "datum_transform_accuracy_m": str(datum_transform.accuracy),
+        "sw_latitude": f"{latitude:.10f}",
+        "sw_longitude": f"{longitude:.10f}",
+    }
+    if (
+        color_minimum is not None
+        and color_maximum is not None
+        and color_divisions is not None
+        and opacity_percent is not None
+    ):
+        tags.update(
+            wind_color_minimum_m_s=str(color_minimum),
+            wind_color_maximum_m_s=str(color_maximum),
+            wind_color_divisions=str(color_divisions),
+            wind_color_step_m_s=str((color_maximum - color_minimum) / color_divisions),
+            kmz_opacity_percent=str(opacity_percent),
+        )
+
+    with rasterio.open(
+        path,
+        "w",
+        driver="GTiff",
+        height=grid.ny,
+        width=grid.nx,
+        count=1,
+        dtype="float32",
+        crs=crs,
+        transform=transform,
+        nodata=np.nan,
+        compress="deflate",
+        predictor=3,
+    ) as dataset:
+        dataset.write(grid.speeds[::-1, :], 1)
+        dataset.set_band_description(1, "Weibull mean wind speed (m/s)")
+        dataset.update_tags(**tags)
+
+
+def create_wind_speed_geotiff(grid: ResourceGrid, output_path: str | Path) -> Path:
+    """Write an unstyled GeoTIFF containing mean wind speed in m/s."""
+    path = Path(output_path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    _write_geotiff(grid, path)
+    return path
+
+
 def create_exports(
     grid: ResourceGrid,
     output_dir: str | Path,
@@ -265,12 +340,8 @@ def create_exports(
     output = Path(output_dir)
     output.mkdir(parents=True, exist_ok=True)
 
-    wgs84_longitude, wgs84_latitude, datum_transform = _wgs84_anchor(grid)
     local_crs = _local_crs(grid)
     to_wgs84 = Transformer.from_crs(local_crs, CRS.from_epsg(4326), always_xy=True)
-    valid = grid.speeds[np.isfinite(grid.speeds)]
-    minimum = float(valid.min())
-    maximum = float(valid.max())
     color_boundaries, color_map, color_norm = _wind_color_scale(
         color_minimum,
         color_maximum,
@@ -279,51 +350,14 @@ def create_exports(
     levels = _contour_levels(grid.speeds, interval, color_minimum)
 
     raster_path = output / "wind_speed.tif"
-    raster_origin_x = grid.sw_x if grid.coordinate_crs is not None else 0.0
-    raster_origin_y = grid.sw_y if grid.coordinate_crs is not None else 0.0
-    transform = from_origin(
-        raster_origin_x - grid.dx / 2,
-        raster_origin_y + (grid.ny - 0.5) * grid.dy,
-        grid.dx,
-        grid.dy,
-    )
-    with rasterio.open(
+    _write_geotiff(
+        grid,
         raster_path,
-        "w",
-        driver="GTiff",
-        height=grid.ny,
-        width=grid.nx,
-        count=1,
-        dtype="float32",
-        crs=local_crs,
-        transform=transform,
-        nodata=np.nan,
-        compress="deflate",
-        predictor=3,
-    ) as dataset:
-        dataset.write(grid.speeds[::-1, :], 1)
-        dataset.set_band_description(1, "Weibull mean wind speed (m/s)")
-        source_horizontal_datum = (
-            f"{grid.coordinate_crs.name} (EPSG:{grid.coordinate_crs.to_epsg()})"
-            if grid.coordinate_crs is not None
-            else "Tokyo Datum (EPSG:4301)"
-        )
-        dataset.update_tags(
-            wind_speed_formula="A * Gamma(1 + 1/k)",
-            source=f"MASCOT .{grid.source_format} all-directions Weibull A and k",
-            source_format=grid.source_format,
-            source_horizontal_datum=source_horizontal_datum,
-            output_horizontal_datum="WGS 84 (EPSG:4326)",
-            datum_transform=datum_transform.description,
-            datum_transform_accuracy_m=str(datum_transform.accuracy),
-            sw_latitude=f"{wgs84_latitude:.10f}",
-            sw_longitude=f"{wgs84_longitude:.10f}",
-            wind_color_minimum_m_s=str(color_minimum),
-            wind_color_maximum_m_s=str(color_maximum),
-            wind_color_divisions=str(color_divisions),
-            wind_color_step_m_s=str((color_maximum - color_minimum) / color_divisions),
-            kmz_opacity_percent=str(kmz_opacity_percent),
-        )
+        color_minimum,
+        color_maximum,
+        color_divisions,
+        kmz_opacity_percent,
+    )
 
     qml_path = output / "wind_speed.qml"
     _write_qml(qml_path, color_minimum, color_maximum, color_divisions)

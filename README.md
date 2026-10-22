@@ -67,6 +67,13 @@ Open `http://localhost:8000`, select an input file and configure the settings, t
 
 The downloaded ZIP filename starts with the download computer's local date and time (`YYYYMMDD_HHMMSS`), for example `YYYYMMDD_HHMMSS_mascot_wind_contours.zip`. Uploaded files are deleted after processing and are not retained by the application.
 
+### WRG → GeoTIFF tab
+
+- Select one or more `.wrg` files. Set the UTM zone number and hemisphere for each file (defaults: **54N**).
+- Each file is converted independently into one single-band Float32 GeoTIFF containing mean wind speed in m/s. No color style is applied, so you can style each raster in QGIS.
+- Download the GeoTIFF files together in a ZIP. Output names are based on the input filenames; duplicate names receive a numeric suffix.
+- The output CRS is the selected WGS 84 / UTM zone for each file.
+
 ## Output files
 
 Extract the downloaded ZIP:
@@ -167,6 +174,13 @@ docker compose up --build
 - 凡例タイトルとカラーバーは、Google Earth Pro上で個別に表示・非表示を切り替えられます。
 
 ZIPのファイル名には、ダウンロードしたPCの年月日と時刻（`YYYYMMDD_HHMMSS`）が先頭に付きます（例：`YYYYMMDD_HHMMSS_mascot_wind_contours.zip`）。アップロードした入力ファイルは変換後に削除され、アプリには保存されません。
+
+#### WRG → GeoTIFFタブ
+
+- `.wrg`を1つ以上選択します。各ファイルごとにUTM zone番号と半球を指定します（初期値は **54N**）。
+- ファイルごとに独立した単バンドFloat32 GeoTIFFを1つ作成し、平均風速（m/s）を格納します。色分けスタイルは付けないため、QGIS側で自由に設定できます。
+- 作成したGeoTIFFはZIPでまとめてダウンロードできます。ファイル名は入力ファイル名を基にし、重複時は番号を付けて区別します。
+- 各GeoTIFFは、そのファイルで選択したWGS 84 / UTM座標系を持ちます。
 
 ## テスト
 

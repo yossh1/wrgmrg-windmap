@@ -16,9 +16,14 @@
       </select>
     </div>
     <h1 data-ja="風況解析GIS変換アプリ" data-en="Wind Resource GIS Converter">風況解析GIS変換アプリ</h1>
-    <p class="note" data-ja="MASCOTから出力される .mrg ファイル、または汎用の風況解析シミュレーションで使われる .wrg ファイルを読み込み、各格子のワイブルパラメーターから平均風速を計算します。" data-en="Load .mrg files exported by MASCOT or .wrg files used by general-purpose wind resource simulation software, and calculate mean wind speed from the Weibull parameters at each grid point.">MASCOTから出力される .mrg ファイル、または汎用の風況解析シミュレーションで使われる .wrg ファイルを読み込み、各格子のワイブルパラメーターから平均風速を計算します。</p>
-    <p class="note" data-ja=".mrg は日本測地系の緯度・経度、.wrg は選択したUTM zoneの座標を使います。出力はQGIS用GeoTIFF・QML・コンターGeoJSONと、Google Earth Pro用KMZをまとめたZIPです。" data-en=".mrg files use Tokyo Datum coordinates; .wrg files use the selected UTM zone. The ZIP contains a GeoTIFF, QML style, and contour GeoJSON for QGIS, plus a KMZ for Google Earth Pro.">.mrg は日本測地系の緯度・経度、.wrg は選択したUTM zoneの座標を使います。出力はQGIS用GeoTIFF・QML・コンターGeoJSONと、Google Earth Pro用KMZをまとめたZIPです。</p>
-    <p class="note" data-ja="風速がカラーマップ範囲外の場合は、下限色または上限色で表示します。" data-en="Wind speeds outside the color-map range are shown using the minimum or maximum color.">風速がカラーマップ範囲外の場合は、下限色または上限色で表示します。</p>
+    <div class="tab-list" role="tablist" aria-label="変換モード" data-ja-aria="変換モード" data-en-aria="Conversion mode">
+      <button id="colored-tab" class="tab-button active" type="button" role="tab" aria-selected="true" aria-controls="colored-panel" data-ja="色付きマップ" data-en="Colored map">色付きマップ</button>
+      <button id="geotiff-tab" class="tab-button" type="button" role="tab" aria-selected="false" aria-controls="geotiff-panel" data-ja="WRG → GeoTIFF" data-en="WRG → GeoTIFF">WRG → GeoTIFF</button>
+    </div>
+    <section id="colored-panel" role="tabpanel" aria-labelledby="colored-tab">
+      <p class="note" data-ja="MASCOTから出力される .mrg ファイル、または汎用の風況解析シミュレーションで使われる .wrg ファイルを読み込み、各格子のワイブルパラメーターから平均風速を計算します。" data-en="Load .mrg files exported by MASCOT or .wrg files used by general-purpose wind resource simulation software, and calculate mean wind speed from the Weibull parameters at each grid point.">MASCOTから出力される .mrg ファイル、または汎用の風況解析シミュレーションで使われる .wrg ファイルを読み込み、各格子のワイブルパラメーターから平均風速を計算します。</p>
+      <p class="note" data-ja=".mrg は日本測地系の緯度・経度、.wrg は選択したUTM zoneの座標を使います。出力はQGIS用GeoTIFF・QML・コンターGeoJSONと、Google Earth Pro用KMZをまとめたZIPです。" data-en=".mrg files use Tokyo Datum coordinates; .wrg files use the selected UTM zone. The ZIP contains a GeoTIFF, QML style, and contour GeoJSON for QGIS, plus a KMZ for Google Earth Pro.">.mrg は日本測地系の緯度・経度、.wrg は選択したUTM zoneの座標を使います。出力はQGIS用GeoTIFF・QML・コンターGeoJSONと、Google Earth Pro用KMZをまとめたZIPです。</p>
+      <p class="note" data-ja="風速がカラーマップ範囲外の場合は、下限色または上限色で表示します。" data-en="Wind speeds outside the color-map range are shown using the minimum or maximum color.">風速がカラーマップ範囲外の場合は、下限色または上限色で表示します。</p>
     <form id="form">
       <label for="mrg_file" data-ja="MASCOT .mrg / .wrgファイル" data-en="Wind resource file (.mrg / .wrg)">MASCOT .mrg / .wrgファイル</label>
       <input id="mrg_file" name="mrg_file" type="file" accept=".mrg,.wrg" required>
@@ -95,6 +100,21 @@ __UTM_ZONE_OPTIONS__
       <br><button type="submit" data-ja="変換してZIPをダウンロード" data-en="Convert and download ZIP">変換してZIPをダウンロード</button>
     </form>
     <p id="error" role="alert"></p>
+    </section>
+    <section id="geotiff-panel" role="tabpanel" aria-labelledby="geotiff-tab" hidden>
+      <p class="note" data-ja="複数のWRGを選択すると、各ファイルの平均風速を個別のGeoTIFFにしてZIPで出力します。色分けスタイルは含めません。" data-en="Select multiple WRG files to create a separate mean wind speed GeoTIFF for each file. The ZIP does not include color styles.">複数のWRGを選択すると、各ファイルの平均風速を個別のGeoTIFFにしてZIPで出力します。色分けスタイルは含めません。</p>
+      <form id="geotiff_form">
+        <label for="wrg_files" data-ja="WRGファイル（複数選択可）" data-en="WRG files (select multiple)">WRGファイル（複数選択可）</label>
+        <input id="wrg_files" name="wrg_files" type="file" accept=".wrg" multiple required>
+        <div id="wrg_file_settings"></div>
+        <button id="geotiff_submit" type="submit" data-ja="GeoTIFFをZIPでダウンロード" data-en="Download GeoTIFFs as ZIP">GeoTIFFをZIPでダウンロード</button>
+        <div id="geotiff_progress_container" class="conversion-progress" hidden>
+          <progress id="geotiff_progress" max="100" value="0" aria-label="変換の進捗"></progress>
+          <p id="geotiff_status" role="status" aria-live="polite"></p>
+        </div>
+      </form>
+      <p id="geotiff_error" role="alert"></p>
+    </section>
   </main>
   <script>window.WIND_CONFIG = __WIND_CONFIG__;</script>
   <script src="/static/app.js" defer></script>
